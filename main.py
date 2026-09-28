@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -593,64 +593,116 @@ async def aggregated_results(
     }
 
 
-# Integração isolada do PT-RIO pela página solicitada. Não altera o parser/rota LOOK.
+# Integração PT-RIO baseada no quadro oficial do ojogodobicho.com.
+# O parser usa os cabeçalhos PPT/PTM/PT/PTV/PTN/COR da própria tabela;
+# os horários são os publicados na explicação da fonte (horário de Brasília).
 RIO_URL = "https://www.ojogodobicho.com/deu_no_poste.htm"
-RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com"}
-RIO_TIMES = {"PPT":"09:20", "PTM":"11:20", "PT":"14:20", "PTV":"16:20", "PTN":"18:20", "COR":"21:20"}
+RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
+RIO_ARCHIVE_URL = "https://www.ojogodobicho.com/resultado"
+
+RIO_TIMES = {
+    "PPT": "09:30", "PTM": "11:30", "PT": "14:30",
+    "PTV": "16:30", "PTN": "18:20", "COR": "21:30",
+    "FED": "20:00",
+}
+
+def rio_schedule_for_day(day: date):
+    # A própria fonte informa grade reduzida aos domingos e exceções semanais.
+    if day.weekday() == 6:  # domingo
+        return {"FED": "11:30", "PT": "14:30", "PTV": "16:30"}
+    if day.weekday() == 2:  # quarta-feira: Federal substitui PTN
+        return {"PPT": "09:30", "PTM": "11:30", "PT": "14:30",
+                "PTV": "16:30", "FED": "20:00", "COR": "21:30"}
+    schedule = dict(RIO_TIMES)
+    if day.weekday() == 5:  # sábado: PTN às 19:30
+        schedule["PTN"] = "19:30"
+    return schedule
 
 def parse_rio_page(html: str, requested_day: date):
     soup = BeautifulSoup(html, "html.parser")
-    # O quadro Rio é reconhecido pelo cabeçalho com as seis siglas, em ordem.
     wanted = ["PPT", "PTM", "PT", "PTV", "PTN", "COR"]
     out = []
+    schedule = rio_schedule_for_day(requested_day)
     for table in soup.find_all("table"):
         rows = table.find_all("tr")
-        if len(rows) < 2: continue
+        if len(rows) < 2:
+            continue
         header_idx = None
-        for i, tr in enumerate(rows[:4]):
-            labels = [_clean(c.get_text(" ", strip=True)).upper() for c in tr.find_all(["th", "td"])]
-            joined = " ".join(labels)
-            if all(re.search(rf"\b{x}\b", joined) for x in wanted):
-                header_idx = i; break
-        if header_idx is None: continue
-        header_cells = rows[header_idx].find_all(["th", "td"])
         col_map = {}
-        for idx, cell in enumerate(header_cells):
-            label = _clean(cell.get_text(" ", strip=True)).upper()
-            for sigla in wanted:
-                if re.search(rf"\b{sigla}\b", label): col_map[idx] = sigla
-        if len(col_map) < 6: continue
-        for tr in rows[header_idx+1:]:
+        for i, tr in enumerate(rows[:5]):
+            labels = [_clean(c.get_text(" ", strip=True)).upper()
+                      for c in tr.find_all(["th", "td"])]
+            found = {}
+            for idx, label in enumerate(labels):
+                for sigla in wanted:
+                    if re.fullmatch(rf"{sigla}", label):
+                        found[idx] = sigla
+                        break
+            if len(set(found.values())) >= 5 and "PPT" in found.values() and "PT" in found.values():
+                header_idx, col_map = i, found
+                break
+        if header_idx is None:
+            continue
+
+        for tr in rows[header_idx + 1:]:
             cells = tr.find_all(["th", "td"])
-            if not cells: continue
-            rankm = re.fullmatch(r"\s*([1-7])\s*(?:º|°)?\s*", _clean(cells[0].get_text(" ", strip=True)))
-            if not rankm: continue
+            if not cells:
+                continue
+            rank_text = _clean(cells[0].get_text(" ", strip=True))
+            rankm = re.fullmatch(r"([1-7])(?:º|°)?", rank_text, re.I)
+            if not rankm:
+                continue
             prize = int(rankm.group(1))
             for idx, sigla in col_map.items():
-                if idx >= len(cells): continue
+                if idx >= len(cells) or sigla not in schedule:
+                    continue
                 val = _clean(cells[idx].get_text(" ", strip=True))
-                m = re.fullmatch(r"(\d{1,4})\s*[-–]\s*(\d{1,2})", val)
-                if not m: continue
-                num, group = m.groups(); g=int(group)
-                if not 1 <= g <= 25: continue
-                out.append({"date":requested_day.isoformat(),"lottery":"PT-RIO","draw_time":RIO_TIMES[sigla],"draw_code":sigla,"prize":prize,"number":num.zfill(4 if prize <= 6 else 3),"group":f"{g:02d}","source":"ojogodobicho.com"})
-        if out: break
-    # bloqueia retorno vazio; não inventa dados nem reaproveita outra data
-    unique={(r['draw_time'],r['prize']):r for r in out}
-    return sorted(unique.values(), key=lambda r:(r['draw_time'],r['prize']))
+                # Formato oficial da tabela: milhar/grupo nos seis primeiros
+                # prêmios e centena/grupo no sétimo. Zeros são placeholders.
+                m = re.fullmatch(r"(\d{3,4})\s*[-–]\s*(\d{1,2})", val)
+                if not m:
+                    continue
+                number, group = m.groups()
+                if set(number) == {"0"}:
+                    continue
+                g = int(group)
+                if not 1 <= g <= 25:
+                    continue
+                expected_len = 4 if prize <= 6 else 3
+                if len(number) != expected_len:
+                    continue
+                out.append({
+                    "date": requested_day.isoformat(),
+                    "lottery": "PT-RIO",
+                    "draw_time": schedule[sigla],
+                    "draw_code": sigla,
+                    "prize": prize,
+                    "number": number,
+                    "group": f"{g:02d}",
+                    "source": "ojogodobicho.com",
+                })
+        if out:
+            break
 
-# Arquivo diário separado para o Rio. A fonte de arquivo publica os boards fechados por data.
-RIO_ARCHIVE_URL = "https://ojogodobiicho.com/resultados-anteriores"
-RIO_ARCHIVE_TIMES = {
-    "PPT": "09:20", "PTM": "11:20", "PT": "14:20",
-    "PTV": "16:20", "PTN": "18:20", "COR": "21:20",
-    "FED": "20:00"
-}
+    # Não deduplicar silenciosamente resultados diferentes. Bloqueia conflito.
+    unique = {}
+    for row in out:
+        key = (row["draw_code"], row["prize"])
+        old = unique.get(key)
+        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
+            raise HTTPException(502, detail={
+                "status": "rio_source_conflict",
+                "date": requested_day.isoformat(),
+                "draw_code": row["draw_code"],
+                "prize": row["prize"],
+                "message": "A tabela oficial apresentou valores conflitantes; resultados bloqueados."
+            })
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 async def fetch_rio_archive(day: date) -> str:
-    # O arquivo PT-RIO usa URL amigável por data, não o parâmetro ?date=.
-    # Exemplo documentado: /resultados-anteriores/2026/07/21
-    url = f"{RIO_ARCHIVE_URL}/{day.year:04d}/{day.month:02d}/{day.day:02d}"
+    # O arquivo oficial usa /resultado/AAAA/MM/DD/ (domínio com um 'i').
+    url = f"{RIO_ARCHIVE_URL}/{day.year:04d}/{day.month:02d}/{day.day:02d}/"
     parsed_host = urlparse(url).hostname or ""
     if parsed_host not in RIO_HOSTS:
         raise HTTPException(400, "Fonte histórica do Rio não autorizada.")
@@ -658,49 +710,17 @@ async def fetch_rio_archive(day: date) -> str:
 
 def parse_rio_archive(html: str, requested_day: date):
     soup = BeautifulSoup(html, "html.parser")
-    text = _clean(soup.get_text(" ", strip=True))
-    # Se a página explicita uma data única diferente, falha fechado.
-    date_candidates = set()
-    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", text):
-        try: date_candidates.add(date(int(yyyy), int(mm), int(dd)))
-        except ValueError: pass
-    if len(date_candidates) == 1 and requested_day not in date_candidates:
+    # A página diária arquivada deve identificar a data solicitada.
+    visible = _clean(soup.get_text(" ", strip=True))
+    found_dates = set()
+    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", visible):
+        try:
+            found_dates.add(date(int(yyyy), int(mm), int(dd)))
+        except ValueError:
+            pass
+    if found_dates and requested_day not in found_dates:
         return []
-
-    out = []
-    # A página arquivada organiza o bloco da banca PT-RIO e cada sorteio em uma linha.
-    # Aceita células contendo milhar e grupo separados por hífen ou ponto médio.
-    for table in soup.find_all("table"):
-        preceding = table.find_previous(['h1','h2','h3','h4','caption'])
-        context = _clean((preceding.get_text(" ", strip=True) if preceding else "") + " " + table.get_text(" ", strip=True)).upper()
-        if "PT-RIO" not in context and "RIO DE JANEIRO" not in context:
-            continue
-        for tr in table.find_all("tr"):
-            cells = tr.find_all(["th", "td"])
-            if len(cells) < 8: continue
-            rowtext = [_clean(c.get_text(" ", strip=True)) for c in cells]
-            # Layout: horário/sigla seguido dos sete prêmios.
-            first = rowtext[0].upper().replace(" ", "")
-            code = next((k for k in RIO_ARCHIVE_TIMES if first.startswith(k)), None)
-            if not code:
-                code = next((k for k in RIO_ARCHIVE_TIMES if k in first), None)
-            if not code: continue
-            for prize, val in enumerate(rowtext[1:8], 1):
-                m = re.search(r"(\d{3,6})\s*(?:[-–·|/]\s*)?(\d{1,2})?", val)
-                if not m: continue
-                raw, group = m.groups()
-                # Algumas tabelas juntam milhar e grupo (6 dígitos); outras usam milhar-grupo.
-                if len(raw) == 6 and not group:
-                    number, group = raw[:4], raw[4:]
-                else:
-                    number = raw[-4:].zfill(4)
-                if not group:
-                    group = str(((int(number[-2:]) - 1) // 4) + 1)
-                g = int(group)
-                if not 1 <= g <= 25: continue
-                out.append({"date":requested_day.isoformat(),"lottery":"PT-RIO","draw_time":RIO_ARCHIVE_TIMES[code],"draw_code":code,"prize":prize,"number":number,"group":f"{g:02d}","source":RIO_ARCHIVE_URL})
-    unique={(r["draw_code"],r["prize"]):r for r in out}
-    return sorted(unique.values(), key=lambda r:(r["draw_time"],r["prize"]))
+    return parse_rio_page(html, requested_day)
 
 @app.get("/api/rio-results")
 async def rio_results(draw_date: Optional[date] = Query(default=None)):
@@ -710,14 +730,30 @@ async def rio_results(draw_date: Optional[date] = Query(default=None)):
         html = await fetch_html(source_url)
         rows = parse_rio_page(html, requested_day)
         now_local = datetime.now(BRAZIL_TZ)
-        rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+        rows = [
+            r for r in rows
+            if datetime.combine(
+                requested_day,
+                datetime.strptime(r["draw_time"], "%H:%M").time(),
+                tzinfo=BRAZIL_TZ
+            ) <= now_local
+        ]
     else:
-        source_url = f"{RIO_ARCHIVE_URL}/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}"
+        source_url = f"{RIO_ARCHIVE_URL}/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}/"
         html = await fetch_rio_archive(requested_day)
         rows = parse_rio_archive(html, requested_day)
     if not rows:
-        raise HTTPException(404, detail={"status":"rio_date_not_found_or_unparsed","date":requested_day.isoformat(),"source":source_url,"message":"A fonte histórica não retornou um quadro PT-RIO reconhecível para esta data. Nenhum resultado de outra data foi usado."})
-    return {"status":"ok","lottery":"PT-RIO","date":requested_day.isoformat(),"source":source_url,"count":len(rows),"results":rows,"note":"Resultados extraídos da fonte indicada para a data solicitada; confira a fonte original."}
+        raise HTTPException(404, detail={
+            "status": "rio_date_not_found_or_unparsed",
+            "date": requested_day.isoformat(),
+            "source": source_url,
+            "message": "A fonte oficial não retornou resultados reconhecíveis para essa data. Nenhum resultado de outra data foi usado."
+        })
+    return {
+        "status": "ok", "lottery": "PT-RIO", "date": requested_day.isoformat(),
+        "source": source_url, "count": len(rows), "results": rows,
+        "note": "Resultados extraídos da tabela da fonte oficial. Horários conforme grade publicada pela fonte."
+    }
 
 @app.get("/api/sources")
 def sources():
