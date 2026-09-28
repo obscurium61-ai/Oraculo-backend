@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.3.0"
+VERSION = "0.4.1-test"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -200,13 +200,230 @@ def brazil_today() -> date:
     return datetime.now(BRAZIL_TZ).date()
 
 
+
+# ---------------------------------------------------------------------------
+# Fonte agregadora experimental: Resultado Sorte
+# Mantém a integração original da LOOK intacta. Esta rota é separada para
+# validar o formato do agregador antes de substituir qualquer integração.
+# ---------------------------------------------------------------------------
+AGGREGATOR_BASE = "https://resultadosorte.com/arquivo"
+AGGREGATOR_HOSTS = {"resultadosorte.com", "www.resultadosorte.com"}
+
+# Aliases intencionais: só associe um nome se houver correspondência conhecida.
+# Os nomes não encontrados continuam aparecendo como ausentes, nunca inventados.
+LOTTERY_ALIASES = {
+    # Nomes canônicos usados pelo HTML, associados aos rótulos que a fonte
+    # Resultado Sorte efetivamente apresenta no arquivo.
+    "PT-RIO": ["PT Rio", "PT-RIO", "PT Rio RJ", "Resultado da PT Rio"],
+    "Bahia-BA": ["Paratodos Bahia", "Bahia", "Bahia-BA", "Paratodos BA"],
+    "Para Todos-SP": ["SP10 / PT-SP", "PT-SP", "PT SP", "Loteria Paulista", "SP10"],
+    "LNS Nacional": ["Loteria Nacional", "LNS Nacional", "Nacional"],
+    "LOOK Goiás": ["Look Loterias", "LOOK", "LOOK Goiás", "Look Loterias GO"],
+    "Lotep-PB": ["LOTEP", "Lotep-PB", "Loteria do Estado da Paraíba"],
+    "Minas-MG": ["Minas", "Minas MG", "Minas Gerais", "Alvorada / Minas Gerais"],
+    "LOTECE-CE": ["Lotece — Loteria dos Sonhos", "LOTECE", "Lotece", "Loteria dos Sonhos"],
+    "Para Todos-PB": ["Paratodos PB", "Para Todos PB", "Para Todos-PB"],
+    "AVAL-PE": ["Aval", "AVAL", "AVAL Pernambuco", "AVAL-PE"],
+    "Tradicional-GO": ["Tradicional-GO", "Loteria Tradicional", "Tradicional Goiás"],
+    # Corujinha é um horário/extração dentro da grade PT Rio, não uma banca
+    # autônoma nessa fonte; não associar automaticamente à banca Coruja.
+    "Coruja": ["Coruja"],
+    "Federal": ["Loteria Federal", "Federal"],
+    "Capital-SC": ["Capital-SC", "Capital SC", "Capital Santa Catarina"],
+    "Sorte-RS": ["Resultado Certo / Loteria Estadual RS", "Resultado Certo", "Loteria Estadual RS", "Sorte-RS", "Sorte RS", "Bicho RS"],
+}
+
+def _normalize_key(value: str) -> str:
+    import unicodedata
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+_ALIAS_LOOKUP = {
+    _normalize_key(alias): canonical
+    for canonical, aliases in LOTTERY_ALIASES.items()
+    for alias in aliases
+}
+
+def validate_aggregator_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.hostname.lower() not in AGGREGATOR_HOSTS:
+        raise HTTPException(400, "Fonte agregadora HTTPS não autorizada.")
+    return url
+
+async def fetch_aggregator_html(day: date) -> tuple[str, str]:
+    url = f"{AGGREGATOR_BASE}/{day.isoformat()}/"
+    validate_aggregator_url(url)
+    key = hashlib.sha256(url.encode()).hexdigest()
+    now = time.time()
+    cached = CACHE.get(key)
+    if cached and now - cached["at"] < CACHE_TTL:
+        return cached["html"], url
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; OraculoResultsBridge/0.4; results parser)",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            response = await client.get(url)
+            if response.status_code == 404:
+                raise HTTPException(404, detail={
+                    "status": "archive_date_unavailable",
+                    "date": day.isoformat(),
+                    "message": "A fonte não possui arquivo publicado para esta data."
+                })
+            response.raise_for_status()
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Falha ao consultar agregador: {type(exc).__name__}")
+    CACHE[key] = {"at": now, "html": response.text}
+    return response.text, url
+
+def parse_aggregator_page(html: str, requested_day: date):
+    soup = BeautifulSoup(html, "html.parser")
+    parsed = []
+    current_bank = None
+
+    # Walk headings and tables in document order so each table inherits the
+    # immediately preceding bank heading. Only explicitly labelled results pass.
+    for node in soup.find_all(["h2", "h3", "h4", "table"]):
+        if node.name in {"h2", "h3", "h4"}:
+            heading = _clean(node.get_text(" ", strip=True))
+            match = re.search(r"(.+?)(?:\s*[—-]\s*|\s*\()", heading)
+            candidate = match.group(1).strip() if match else heading
+            normalized_heading = _normalize_key(heading)
+            current_bank = None
+            # Prefer a whole normalized heading or a phrase boundary match.
+            # Match aliases inside descriptive headings such as "Resultado da PT Rio em..."
+            # without allowing short generic words to match unrelated banks.
+            for alias_norm, canonical in sorted(_ALIAS_LOOKUP.items(), key=lambda item: len(item[0]), reverse=True):
+                if not alias_norm:
+                    continue
+                if normalized_heading == alias_norm or re.search(rf"(?<![a-z0-9]){re.escape(alias_norm)}(?![a-z0-9])", normalized_heading):
+                    current_bank = canonical
+                    break
+            continue
+
+        if node.name != "table" or not current_bank:
+            continue
+        rows = node.find_all("tr")
+        if len(rows) < 2:
+            continue
+        header_cells = rows[0].find_all(["th", "td"])
+        draw_columns = {}
+        for idx, cell in enumerate(header_cells):
+            label = _clean(cell.get_text(" ", strip=True))
+            tm = re.search(r"(\d{1,2}:\d{2})", label)
+            if tm:
+                hh, mm = tm.group(1).split(":")
+                draw_columns[idx] = f"{int(hh):02d}:{mm}"
+
+        if not draw_columns:
+            continue
+
+        for tr in rows[1:]:
+            cells = tr.find_all(["th", "td"])
+            if len(cells) < 2:
+                continue
+            prize_text = _clean(cells[0].get_text(" ", strip=True))
+            pm = re.search(r"\b([1-7])\s*º?\b", prize_text, re.I)
+            if not pm:
+                continue
+            prize = int(pm.group(1))
+            for col_idx, draw_time in draw_columns.items():
+                if col_idx >= len(cells):
+                    continue
+                cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
+                # Common archive cell: "4395 24 Veado" or "4395-24".
+                nm = re.search(r"(?<!\d)(\d{3,4})\s*(?:[-– ]\s*)?(?:G\s*)?0?(\d{1,2})(?:\s|$)", cell_text, re.I)
+                if not nm:
+                    continue
+                number_raw, group_raw = nm.groups()
+                group = int(group_raw)
+                if not 1 <= group <= 25:
+                    continue
+                number = number_raw.zfill(4 if prize <= 5 else 3)
+                parsed.append({
+                    "date": requested_day.isoformat(),
+                    "lottery": current_bank,
+                    "draw_time": draw_time,
+                    "prize": prize,
+                    "number": number,
+                    "group": f"{group:02d}",
+                    "source": "resultadosorte.com",
+                    "validation": "unverified_aggregator",
+                })
+
+    # Avoid silently overwriting conflicting data from duplicate table renderings.
+    unique = {}
+    for row in parsed:
+        key = (row["lottery"], row["draw_time"], row["prize"])
+        if key in unique:
+            old = unique[key]
+            if old["number"] != row["number"] or old["group"] != row["group"]:
+                raise HTTPException(502, detail={
+                    "status": "aggregator_conflict",
+                    "date": requested_day.isoformat(),
+                    "lottery": row["lottery"],
+                    "draw_time": row["draw_time"],
+                    "prize": row["prize"],
+                    "message": "Foram encontrados valores conflitantes; os dados foram bloqueados."
+                })
+        else:
+            unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["lottery"], r["draw_time"], r["prize"]))
+
+@app.get("/api/aggregated-results")
+async def aggregated_results(
+    draw_date: Optional[date] = Query(default=None),
+    lottery: Optional[str] = Query(default=None, max_length=60),
+):
+    requested_day = draw_date or brazil_today()
+    html, url = await fetch_aggregator_html(requested_day)
+    rows = parse_aggregator_page(html, requested_day)
+    if lottery:
+        target = _normalize_key(lottery)
+        rows = [
+            row for row in rows
+            if _normalize_key(row["lottery"]) == target
+            or target in [_normalize_key(a) for a in LOTTERY_ALIASES.get(row["lottery"], [])]
+        ]
+    if not rows:
+        raise HTTPException(404, detail={
+            "status": "no_mapped_results",
+            "date": requested_day.isoformat(),
+            "lottery": lottery,
+            "source": url,
+            "message": "Nenhum resultado foi extraído com correspondência explícita. Isso não significa que a banca não sorteou; a fonte pode usar outro nome ou estrutura."
+        })
+    return {
+        "status": "ok",
+        "date": requested_day.isoformat(),
+        "source": url,
+        "count": len(rows),
+        "lotteries_found": sorted({r["lottery"] for r in rows}),
+        "results": rows,
+        "note": "Fonte agregadora experimental. Confira a banca, horário e status na fonte original antes de usar como histórico oficial."
+    }
+
+@app.get("/api/sources")
+def sources():
+    return {
+        "version": VERSION,
+        "existing": ["LOOK Goiás via ojogodobicho.com"],
+        "experimental": ["Resultado Sorte via resultadosorte.com"],
+        "requested_lotteries": list(LOTTERY_ALIASES.keys()),
+        "note": "A fonte pública atualmente cobre apenas algumas das bancas solicitadas. Bancas ausentes ou sem extração publicada devem ser sinalizadas como indisponíveis, sem inventar resultados. LOOK permanece na rota original validada."
+    }
+
 @app.get("/")
 def root():
     return {
         "service": APP_NAME,
         "status": "online",
         "version": VERSION,
-        "supported_source": "LOOK Goiás (ojogodobicho.com histórico)",
+        "supported_source": "LOOK Goiás validada; agregador Resultado Sorte experimental",
         "supported_times": sorted(LOOK_TIMES),
         "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
     }
