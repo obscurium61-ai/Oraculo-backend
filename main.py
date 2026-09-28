@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -635,46 +635,66 @@ async def aggregated_results(
         dnp_lottery = "LNS Nacional"
 
     if dnp_lottery:
-        if requested_day != brazil_today() and dnp_lottery == "Para Todos-SP":
-            # Date-specific archive source: /resultados-anteriores/YYYY/MM/DD
-            url = f"https://ojogodobiicho.com/resultados-anteriores/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}"
-            html = await fetch_html(url)
-            rows = parse_ptsp_archive(html, requested_day)
-            rows = [r for r in rows if r["lottery"] == "Para Todos-SP"]
+        if requested_day != brazil_today():
+            # Use date-indexed archive sources for BOTH SP and Nacional.
+            # Filter strictly by canonical lottery/aliases; never relabel today's page.
+            html_archive, archive_url = await fetch_aggregator_html(requested_day)
+            archive_rows = parse_aggregator_page(html_archive, requested_day)
+            aliases = LOTTERY_ALIASES.get(dnp_lottery, [dnp_lottery])
+            alias_keys = {_normalize_key(x) for x in aliases + [dnp_lottery]}
+            rows = [
+                row for row in archive_rows
+                if _normalize_key(row.get("lottery", "")) in alias_keys
+            ]
+            # PT-SP archive parser is a fallback for that exact historical date.
+            if not rows and dnp_lottery == "Para Todos-SP":
+                ptsp_url = f"https://ojogodobiicho.com/resultados-anteriores/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}"
+                try:
+                    ptsp_html = await fetch_html(ptsp_url)
+                    rows = parse_ptsp_archive(ptsp_html, requested_day)
+                except HTTPException:
+                    rows = []
+                archive_url = ptsp_url
             if not rows:
                 raise HTTPException(404, detail={
-                    "status":"ptsp_archive_no_rows", "date":requested_day.isoformat(),
-                    "lottery":dnp_lottery, "source":url,
-                    "message":"A página histórica foi consultada, mas não retornou linhas PT-SP reconhecíveis para essa data."
+                    "status": "lottery_archive_no_rows",
+                    "date": requested_day.isoformat(),
+                    "lottery": dnp_lottery,
+                    "source": archive_url,
+                    "message": "A fonte histórica foi consultada, mas não retornou resultados reconhecíveis dessa banca para a data. Nenhum resultado de hoje foi usado."
                 })
             return {
-                "status":"ok", "date":requested_day.isoformat(), "lottery":dnp_lottery,
-                "source":url, "count":len(rows), "results":rows,
-                "note":"Resultados históricos extraídos da tabela PT-SP do arquivo por data. Confira a banca e o horário na fonte."
+                "status": "ok", "date": requested_day.isoformat(),
+                "lottery": dnp_lottery, "source": archive_url,
+                "count": len(rows), "results": rows,
+                "note": "Resultados extraídos do arquivo da data selecionada; confira banca e horários na fonte."
             }
 
         url = DNP_NACIONAL_BASE + DNP_PAGES[dnp_lottery]
         html = await fetch_dnp_html(url)
         rows = parse_dnp_nacional_page(html, requested_day, dnp_lottery)
-        # The current-result pages are not date-indexed archives.
-        if requested_day != brazil_today():
-            raise HTTPException(404, detail={
-                "status":"dnp_archive_not_confirmed", "date":requested_day.isoformat(),
-                "lottery":dnp_lottery, "source":url,
-                "message":"O arquivo histórico dessa modalidade ainda não foi confirmado; nenhum resultado atual foi atribuído a uma data passada."
-            })
         now_local = datetime.now(BRAZIL_TZ)
-        rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+        rows = [
+            r for r in rows
+            if datetime.combine(
+                requested_day,
+                datetime.strptime(r["draw_time"], "%H:%M").time(),
+                tzinfo=BRAZIL_TZ
+            ) <= now_local
+        ]
         if not rows:
             raise HTTPException(404, detail={
-                "status":"dnp_no_published_results", "date":requested_day.isoformat(),
-                "lottery":dnp_lottery, "source":url,
-                "message":"Nenhum resultado preenchido foi extraído para esta banca e data."
+                "status": "dnp_no_published_results",
+                "date": requested_day.isoformat(),
+                "lottery": dnp_lottery,
+                "source": url,
+                "message": "Nenhum resultado preenchido foi extraído para esta banca e data."
             })
         return {
-            "status":"ok", "date":requested_day.isoformat(), "lottery":dnp_lottery,
-            "source":url, "count":len(rows), "results":rows,
-            "note":"Resultados extraídos da página atual do Deu no Poste Nacional."
+            "status": "ok", "date": requested_day.isoformat(),
+            "lottery": dnp_lottery, "source": url,
+            "count": len(rows), "results": rows,
+            "note": "Resultados extraídos da página atual do Deu no Poste Nacional."
         }
 
     html, url = await fetch_aggregator_html(requested_day)
@@ -764,7 +784,7 @@ def parse_rio_page(html: str, requested_day: date):
             if not cells:
                 continue
             rank_text = _clean(cells[0].get_text(" ", strip=True))
-            rankm = re.fullmatch(r"([1-7])(?:º|°)?", rank_text, re.I)
+            rankm = re.fullmatch(r"(10|[1-9])(?:º|°)?", rank_text, re.I)
             if not rankm:
                 continue
             prize = int(rankm.group(1))
@@ -783,8 +803,7 @@ def parse_rio_page(html: str, requested_day: date):
                 g = int(group)
                 if not 1 <= g <= 25:
                     continue
-                expected_len = 4 if prize <= 6 else 3
-                if len(number) != expected_len:
+                if len(number) not in (3, 4):
                     continue
                 out.append({
                     "date": requested_day.isoformat(),
@@ -865,7 +884,7 @@ def parse_rio_archive(html: str, requested_day: date):
             cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
             if len(cells) < 5:
                 continue
-            rank_match = re.fullmatch(r"\s*([1-7])\D*", cells[0], re.I)
+            rank_match = re.fullmatch(r"\s*(10|[1-9])\D*", cells[0], re.I)
             if not rank_match:
                 continue
             prize = int(rank_match.group(1))
