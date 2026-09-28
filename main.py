@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -406,12 +406,162 @@ def parse_aggregator_page(html: str, requested_day: date):
         unique[key] = row
     return sorted(unique.values(), key=lambda r: (r["lottery"], r["draw_time"], r["prize"]))
 
+
+# Integração adicional isolada: Deu no Poste Nacional (Bicho SP / Nacional).
+# Não modifica os parsers ou rotas existentes da LOOK e do PT-RIO.
+DNP_NACIONAL_BASE = "https://deunopostenacional.com.br"
+DNP_NACIONAL_HOSTS = {"deunopostenacional.com.br", "www.deunopostenacional.com.br"}
+DNP_PAGES = {
+    "Para Todos-SP": "/jogo-do-bicho-sao-paulo/",
+    "LNS Nacional": "/loteria-nacional/",
+}
+
+def validate_dnp_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.hostname.lower() not in DNP_NACIONAL_HOSTS:
+        raise HTTPException(400, "Fonte Deu no Poste Nacional HTTPS não autorizada.")
+    return url
+
+async def fetch_dnp_html(url: str) -> str:
+    validate_dnp_url(url)
+    key = hashlib.sha256(url.encode()).hexdigest()
+    cached = CACHE.get(key)
+    if cached and time.time() - cached["at"] < CACHE_TTL:
+        return cached["html"]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Falha ao consultar Deu no Poste Nacional: {type(exc).__name__}")
+    CACHE[key] = {"at": time.time(), "html": response.text}
+    return response.text
+
+def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
+    """Extrai resultados das tabelas visíveis do Deu no Poste Nacional.
+    Em páginas com tabelas resumidas e tabelas 1º-10º, prioriza o quadro
+    completo de dez prêmios para cada horário, evitando duplicação."""
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    cards = soup.select("div.dnp-qb-card")
+    if not cards:
+        cards = soup.select("section.dnp-qb-section")
+    animal_to_group = {
+        "avestruz":1,"aguia":2,"burro":3,"borboleta":4,"cachorro":5,
+        "cabra":6,"carneiro":7,"camelo":8,"cobra":9,"coelho":10,
+        "cavalo":11,"elefante":12,"galo":13,"gato":14,"jacare":15,
+        "leao":16,"macaco":17,"porco":18,"pavao":19,"peru":20,
+        "touro":21,"tigre":22,"urso":23,"veado":24,"vaca":25,
+    }
+    selected = []
+    for card in cards:
+        heading = card.find(["h3", "h4"])
+        if not heading:
+            continue
+        title = _clean(heading.get_text(" ", strip=True))
+        tm = re.search(r"\((\d{1,2})\s*h\s*(\d{1,2})\s*min", title, re.I)
+        if not tm:
+            tm = re.search(r"\b(\d{1,2})\s*:\s*(\d{2})\b", title)
+        if not tm:
+            continue
+        draw_time = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+        table = card.find("table", class_=re.compile(r"resultado-tabela"))
+        if not table:
+            continue
+        rows = table.find_all("tr")
+        parsed_rows = []
+        for tr in rows[1:]:
+            cells = tr.find_all(["th", "td"])
+            if len(cells) < 3:
+                continue
+            rankm = re.fullmatch(r"\s*(10|[1-9])\D*", _clean(cells[0].get_text(" ", strip=True)), re.I)
+            numberm = re.search(r"(?<!\d)(\d{4})(?!\d)", _clean(cells[1].get_text(" ", strip=True)))
+            groupm = re.search(r"\((\d{1,2})\)", _clean(cells[2].get_text(" ", strip=True)))
+            if not rankm or not numberm or not groupm:
+                continue
+            prize = int(rankm.group(1))
+            group = int(groupm.group(1))
+            if not 1 <= prize <= 10 or not 1 <= group <= 25:
+                continue
+            animal_text = _normalize_key(cells[2].get_text(" ", strip=True))
+            animal = animal_text.split(" ")[0] if animal_text else ""
+            known_group = animal_to_group.get(animal)
+            if known_group and known_group != group:
+                continue
+            parsed_rows.append({
+                "date": requested_day.isoformat(), "lottery": lottery,
+                "draw_time": draw_time, "prize": prize,
+                "number": numberm.group(1), "group": f"{group:02d}",
+                "source": "deunopostenacional.com.br",
+            })
+        if parsed_rows:
+            is_full = len(parsed_rows) >= 8 or "1" in title and "10" in title
+            selected.append((draw_time, is_full, parsed_rows))
+    # For each draw time, choose the fuller table; summary and expanded table
+    # share the same time, so don't append both.
+    by_time = {}
+    for draw_time, is_full, rows in selected:
+        old = by_time.get(draw_time)
+        if old is None or (is_full and not old[0]) or len(rows) > len(old[1]):
+            by_time[draw_time] = (is_full, rows)
+    for _, rows in by_time.values():
+        out.extend(rows)
+    unique = {}
+    for row in out:
+        key = (row["draw_time"], row["prize"])
+        if key in unique and (unique[key]["number"] != row["number"] or unique[key]["group"] != row["group"]):
+            raise HTTPException(502, detail={
+                "status":"dnp_source_conflict", "date":requested_day.isoformat(),
+                "lottery":lottery, "draw_time":row["draw_time"], "prize":row["prize"],
+                "message":"A fonte apresentou resultados conflitantes para o mesmo horário e prêmio."
+            })
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r:(r["draw_time"],r["prize"]))
+
 @app.get("/api/aggregated-results")
 async def aggregated_results(
     draw_date: Optional[date] = Query(default=None),
     lottery: Optional[str] = Query(default=None, max_length=60),
 ):
     requested_day = draw_date or brazil_today()
+    requested_key = _normalize_key(lottery or "")
+    dnp_lottery = None
+    if requested_key in {"para todos sp", "pt sp", "bicho sp", "sao paulo", "loteria paulista"}:
+        dnp_lottery = "Para Todos-SP"
+    elif requested_key in {"lns nacional", "nacional", "loteria nacional"}:
+        dnp_lottery = "LNS Nacional"
+
+    if dnp_lottery:
+        url = DNP_NACIONAL_BASE + DNP_PAGES[dnp_lottery]
+        html = await fetch_dnp_html(url)
+        rows = parse_dnp_nacional_page(html, requested_day, dnp_lottery)
+        # The source page is a current-result page, not a date-indexed archive.
+        # For past dates, refuse to relabel today's results as historical.
+        if requested_day != brazil_today():
+            raise HTTPException(404, detail={
+                "status":"dnp_archive_not_confirmed", "date":requested_day.isoformat(),
+                "lottery":dnp_lottery, "source":url,
+                "message":"Esta página do Deu no Poste Nacional não foi confirmada como arquivo por data; nenhum resultado atual foi atribuído a uma data passada."
+            })
+        now_local = datetime.now(BRAZIL_TZ)
+        rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+        if not rows:
+            raise HTTPException(404, detail={
+                "status":"dnp_no_published_results", "date":requested_day.isoformat(),
+                "lottery":dnp_lottery, "source":url,
+                "message":"Nenhum resultado preenchido foi extraído para esta banca e data."
+            })
+        return {
+            "status":"ok", "date":requested_day.isoformat(), "lottery":dnp_lottery,
+            "source":url, "count":len(rows), "results":rows,
+            "note":"Resultados extraídos da página atual do Deu no Poste Nacional. A página de arquivo por data ainda não foi validada."
+        }
+
     html, url = await fetch_aggregator_html(requested_day)
     rows = parse_aggregator_page(html, requested_day)
     source_host = urlparse(url).hostname or "fonte-externa"
