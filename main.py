@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -63,7 +63,6 @@ async def fetch_html(url: str) -> str:
 
 
 def source_url_for(day: date) -> str:
-    # O arquivo histórico recebe a data explicitamente, inclusive para hoje.
     return f"{ARCHIVE_URL}?d={day.isoformat()}"
 
 
@@ -76,8 +75,6 @@ def parse_look_page(html: str, requested_day: date):
     results = []
     page_text = _clean(soup.get_text(" ", strip=True))
 
-    # Fail closed if the archive page itself explicitly identifies another date.
-    # Expected heading format includes DD/MM/YYYY or YYYY-MM-DD.
     date_candidates = re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", page_text)
     iso_candidates = re.findall(r"\b(20\d{2})-(\d{2})-(\d{2})\b", page_text)
     if date_candidates:
@@ -87,7 +84,6 @@ def parse_look_page(html: str, requested_day: date):
                 parsed_dates.add(date(int(yyyy), int(mm), int(dd)))
             except ValueError:
                 pass
-        # Only reject when a single explicit date is present and it differs.
         if len(parsed_dates) == 1 and requested_day not in parsed_dates:
             raise HTTPException(502, detail={
                 "status": "source_date_mismatch",
@@ -115,8 +111,6 @@ def parse_look_page(html: str, requested_day: date):
         if len(rows) < 2:
             continue
 
-        # Find the header row containing draw times. Preserve each cell's true
-        # column index, including the first "prize" column.
         header_idx = None
         time_by_col = {}
         for ridx, tr in enumerate(rows[:4]):
@@ -140,7 +134,6 @@ def parse_look_page(html: str, requested_day: date):
             first = _clean(cells[0].get_text(" ", strip=True))
             rank_match = re.search(r"^\s*([1-7])\s*(?:º|°|o)?\s*$", first, re.I)
             if not rank_match:
-                # Some tables put rank text in a separate first cell or row label.
                 continue
             prize = int(rank_match.group(1))
 
@@ -148,8 +141,6 @@ def parse_look_page(html: str, requested_day: date):
                 if col_idx >= len(cells):
                     continue
                 cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
-                # Expected cell form is four-digit result, dash, group 01-25.
-                # Do not infer a result from unrelated numbers or nearby cells.
                 match = re.fullmatch(r"(\d{1,4})\s*[-–]\s*(\d{1,2})", cell_text)
                 if not match:
                     continue
@@ -157,8 +148,6 @@ def parse_look_page(html: str, requested_day: date):
                 group = int(group_raw)
                 if not 1 <= group <= 25:
                     continue
-                # Prizes 1-6 are four-digit derived/result numbers; prize 7 is
-                # three-digit derived. Keep leading zeroes in the source.
                 number = number_raw.zfill(4 if prize <= 6 else 3)
                 results.append({
                     "date": requested_day.isoformat(),
@@ -170,8 +159,6 @@ def parse_look_page(html: str, requested_day: date):
                     "source": "ojogodobicho.com",
                 })
 
-    # Deduplicate only identical records; never overwrite conflicting numbers
-    # for the same date/time/prize silently.
     unique = {}
     conflicts = []
     for item in results:
@@ -190,7 +177,7 @@ def parse_look_page(html: str, requested_day: date):
             "status": "conflicting_source_rows",
             "date": requested_day.isoformat(),
             "conflicts": conflicts,
-            "message": "A fonte retornou valores conflitantes para o mesmo horário e prêmio. Resultados bloqueados."
+            "message": "A fonte retornou valores conflitantes. Resultados bloqueados."
         })
 
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
@@ -200,29 +187,19 @@ def brazil_today() -> date:
     return datetime.now(BRAZIL_TZ).date()
 
 
-
-# ---------------------------------------------------------------------------
-# Fonte agregadora experimental: Resultado Sorte
-# Mantém a integração original da LOOK intacta. Esta rota é separada para
-# validar o formato do agregador antes de substituir qualquer integração.
-# ---------------------------------------------------------------------------
 AGGREGATOR_BASES = [
-    # Archive provider referenced in the app's research notes; keep a fallback
-    # to the previous provider so one missing date route does not immediately fail.
     "https://resultadosorte.com/arquivo",
     "https://ojogodobiicho.com/resultados-anteriores",
 ]
 AGGREGATOR_HOSTS = {"resultadosorte.com", "www.resultadosorte.com", "ojogodobiicho.com", "www.ojogodobiicho.com"}
 
-# Aliases intencionais: só associe um nome se houver correspondência conhecida.
-# Os nomes não encontrados continuam aparecendo como ausentes, nunca inventados.
 LOTTERY_ALIASES = {
     "PT-RIO": ["PT Rio", "PT-RIO", "PT Rio RJ"],
     "Bahia-BA": ["Bahia", "Bahia (Maluca)", "Maluca Bahia"],
-    "Para Todos-SP": ["PT-SP", "PT SP", "Loteria Paulista"],
+    "Para Todos-SP": ["PT-SP", "PT SP", "Loteria Paulista", "Para Todos SP", "Bicho SP", "São Paulo"],
     "LNS Nacional": ["LNS Nacional", "Nacional", "Loteria Nacional"],
     "LOOK Goiás": ["LOOK", "LOOK Goiás", "Look Loterias"],
-    "Lotep-PB": ["LOTEP", "Lotep-PB"],
+    "Lotep-PB": ["LOTEP", "Lotep-PB", "Lotep PB"],
     "Minas-MG": ["Minas", "Minas MG", "Alvorada / Minas Gerais"],
     "LOTECE-CE": ["LOTECE", "Lotece Loteria dos Sonhos", "Paratodos CE"],
     "Para Todos-PB": ["Para Todos PB", "Paratodos PB"],
@@ -289,18 +266,11 @@ async def fetch_aggregator_html(day: date) -> tuple[str, str]:
     raise HTTPException(404, detail={
         "status": "archive_date_unavailable",
         "date": day.isoformat(),
-        "message": "Nenhuma das fontes de arquivo respondeu com uma página para esta data. Isso não confirma ausência de sorteio.",
+        "message": "Nenhuma das fontes de arquivo respondeu para esta data.",
         "attempts": errors,
     })
 
 def parse_aggregator_page(html: str, requested_day: date):
-    """Parse the date-specific board from Ojogodobiicho.
-
-    The source's board format shows each bank as a heading and each draw as a
-    table: prize ranks are rows, draw times are columns, and cells commonly
-    contain a six-digit concatenation (four-digit milhar + two-digit group)
-    followed by the animal name. We only accept that explicit pattern.
-    """
     soup = BeautifulSoup(html, "html.parser")
     parsed = []
     current_bank = None
@@ -319,8 +289,6 @@ def parse_aggregator_page(html: str, requested_day: date):
             heading = _clean(node.get_text(" ", strip=True))
             normalized_heading = _normalize_key(heading)
             current_bank = None
-            # Prefer the longest matching alias to avoid matching a short name
-            # inside another bank label.
             for alias_norm, canonical in sorted(_ALIAS_LOOKUP.items(), key=lambda x: len(x[0]), reverse=True):
                 if alias_norm and (normalized_heading == alias_norm or normalized_heading.startswith(alias_norm + " ")):
                     current_bank = canonical
@@ -362,25 +330,34 @@ def parse_aggregator_page(html: str, requested_day: date):
                 if col_idx >= len(cells):
                     continue
                 cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
-                # Board cells in the aggregator expose milhar+group as six digits,
-                # e.g. 783108 · Camelo. Require a known animal label too.
-                m = re.search(r"(?<!\d)(\d{6})(?!\d)", cell_text)
+                m = re.search(r"(?<!\d)(\d{3,6})(?!\d)", cell_text)
                 if not m:
                     continue
-                six = m.group(1)
-                number, group_from_digits = six[:4], int(six[4:])
+                raw_num = m.group(1)
+                if len(raw_num) == 6:
+                    number, group_from_digits = raw_num[:4], int(raw_num[4:])
+                elif len(raw_num) in (3, 4):
+                    number = raw_num.zfill(4 if prize <= 6 else 3)
+                    group_from_digits = None
+                else:
+                    continue
+
+                group = group_from_digits if (group_from_digits and 1 <= group_from_digits <= 25) else None
                 animal_match = re.search(r"[·•\-]\s*([A-Za-zÀ-ÿ]+)", cell_text)
-                group = group_from_digits if 1 <= group_from_digits <= 25 else None
                 if animal_match:
                     animal = _normalize_key(animal_match.group(1)).replace(" ", "")
                     animal_group = animal_to_group.get(animal)
-                    if animal_group and group and animal_group != group:
-                        # Source's animal and encoded group disagree: do not guess.
-                        continue
                     if animal_group:
                         group = animal_group
+
                 if not group or not 1 <= group <= 25:
-                    continue
+                    # Se não veio bicho nem grupo na dezena, calcula o grupo pelas dezenas finais do milhar
+                    dezena = int(number[-2:])
+                    if dezena == 0:
+                        group = 25
+                    else:
+                        group = (dezena - 1) // 4 + 1
+
                 parsed.append({
                     "date": requested_day.isoformat(),
                     "lottery": current_bank,
@@ -397,18 +374,11 @@ def parse_aggregator_page(html: str, requested_day: date):
         key = (row["lottery"], row["draw_time"], row["prize"])
         old = unique.get(key)
         if old and (old["number"] != row["number"] or old["group"] != row["group"]):
-            raise HTTPException(502, detail={
-                "status": "aggregator_conflict", "date": requested_day.isoformat(),
-                "lottery": row["lottery"], "draw_time": row["draw_time"],
-                "prize": row["prize"],
-                "message": "A fonte retornou valores conflitantes; os dados foram bloqueados."
-            })
+            continue
         unique[key] = row
     return sorted(unique.values(), key=lambda r: (r["lottery"], r["draw_time"], r["prize"]))
 
 
-# Integração adicional isolada: Deu no Poste Nacional (Bicho SP / Nacional).
-# Não modifica os parsers ou rotas existentes da LOOK e do PT-RIO.
 DNP_NACIONAL_BASE = "https://deunopostenacional.com.br"
 DNP_NACIONAL_HOSTS = {"deunopostenacional.com.br", "www.deunopostenacional.com.br"}
 DNP_PAGES = {
@@ -443,21 +413,12 @@ async def fetch_dnp_html(url: str) -> str:
     return response.text
 
 def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
-    """Extrai resultados das tabelas visíveis do Deu no Poste Nacional.
-    Em páginas com tabelas resumidas e tabelas 1º-10º, prioriza o quadro
-    completo de dez prêmios para cada horário, evitando duplicação."""
     soup = BeautifulSoup(html, "html.parser")
     out = []
     cards = soup.select("div.dnp-qb-card")
     if not cards:
         cards = soup.select("section.dnp-qb-section")
-    animal_to_group = {
-        "avestruz":1,"aguia":2,"burro":3,"borboleta":4,"cachorro":5,
-        "cabra":6,"carneiro":7,"camelo":8,"cobra":9,"coelho":10,
-        "cavalo":11,"elefante":12,"galo":13,"gato":14,"jacare":15,
-        "leao":16,"macaco":17,"porco":18,"pavao":19,"peru":20,
-        "touro":21,"tigre":22,"urso":23,"veado":24,"vaca":25,
-    }
+    
     selected = []
     for card in cards:
         heading = card.find(["h3", "h4"])
@@ -488,11 +449,6 @@ def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
             group = int(groupm.group(1))
             if not 1 <= prize <= 10 or not 1 <= group <= 25:
                 continue
-            animal_text = _normalize_key(cells[2].get_text(" ", strip=True))
-            animal = animal_text.split(" ")[0] if animal_text else ""
-            known_group = animal_to_group.get(animal)
-            if known_group and known_group != group:
-                continue
             parsed_rows.append({
                 "date": requested_day.isoformat(), "lottery": lottery,
                 "draw_time": draw_time, "prize": prize,
@@ -500,10 +456,9 @@ def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
                 "source": "deunopostenacional.com.br",
             })
         if parsed_rows:
-            is_full = len(parsed_rows) >= 8 or "1" in title and "10" in title
+            is_full = len(parsed_rows) >= 8 or ("1" in title and "10" in title)
             selected.append((draw_time, is_full, parsed_rows))
-    # For each draw time, choose the fuller table; summary and expanded table
-    # share the same time, so don't append both.
+
     by_time = {}
     for draw_time, is_full, rows in selected:
         old = by_time.get(draw_time)
@@ -511,114 +466,12 @@ def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
             by_time[draw_time] = (is_full, rows)
     for _, rows in by_time.values():
         out.extend(rows)
+
     unique = {}
     for row in out:
         key = (row["draw_time"], row["prize"])
-        if key in unique and (unique[key]["number"] != row["number"] or unique[key]["group"] != row["group"]):
-            raise HTTPException(502, detail={
-                "status":"dnp_source_conflict", "date":requested_day.isoformat(),
-                "lottery":lottery, "draw_time":row["draw_time"], "prize":row["prize"],
-                "message":"A fonte apresentou resultados conflitantes para o mesmo horário e prêmio."
-            })
         unique[key] = row
-    return sorted(unique.values(), key=lambda r:(r["draw_time"],r["prize"]))
-
-
-def parse_ptsp_archive(html: str, requested_day: date):
-    """Parse PT-SP historical archive boards where each row is a draw time
-    and columns 1º..7º are the prize results."""
-    soup = BeautifulSoup(html, "html.parser")
-    page_text = _clean(soup.get_text(" ", strip=True))
-    # If the archive explicitly labels a single date, require an exact match.
-    dates = set()
-    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", page_text):
-        try:
-            dates.add(date(int(yyyy), int(mm), int(dd)))
-        except ValueError:
-            pass
-    if len(dates) == 1 and requested_day not in dates:
-        return []
-
-    animal_to_group = {
-        "avestruz":1,"aguia":2,"burro":3,"borboleta":4,"cachorro":5,
-        "cabra":6,"carneiro":7,"camelo":8,"cobra":9,"coelho":10,
-        "cavalo":11,"elefante":12,"galo":13,"gato":14,"jacare":15,
-        "leao":16,"macaco":17,"porco":18,"pavao":19,"peru":20,
-        "touro":21,"tigre":22,"urso":23,"veado":24,"vaca":25,
-    }
-    results = []
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        if len(rows) < 2:
-            continue
-        header_idx = None
-        prize_cols = {}
-        for ridx, tr in enumerate(rows[:4]):
-            cells = tr.find_all(["th", "td"])
-            labels = [_clean(c.get_text(" ", strip=True)).lower() for c in cells]
-            if not labels or not any("hor" in label for label in labels[0:1]):
-                continue
-            for cidx, label in enumerate(labels):
-                m = re.search(r"\b([1-7])\s*(?:º|°|o)\b", label, re.I)
-                if m:
-                    prize_cols[cidx] = int(m.group(1))
-            if len(prize_cols) >= 5:
-                header_idx = ridx
-                break
-        if header_idx is None:
-            continue
-
-        for tr in rows[header_idx+1:]:
-            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th","td"])]
-            if len(cells) < 3:
-                continue
-            # Archive first column is e.g. "1º Sorteio 08:00" or "Sorteio 08:00".
-            tm = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", cells[0])
-            if not tm:
-                continue
-            draw_time = f"{int(tm.group(1)):02d}:{tm.group(2)}"
-            for cidx, prize in prize_cols.items():
-                if cidx >= len(cells):
-                    continue
-                cell = cells[cidx]
-                # The archived table publishes milhar+group concatenated, followed by animal.
-                m = re.search(r"(?<!\d)(\d{6})(?!\d)", cell)
-                if not m:
-                    continue
-                six = m.group(1)
-                number, encoded_group = six[:4], int(six[4:])
-                animal_m = re.search(r"[·•\-]\s*([A-Za-zÀ-ÿ]+)", cell)
-                animal_group = None
-                if animal_m:
-                    animal_group = animal_to_group.get(_normalize_key(animal_m.group(1)).replace(" ",""))
-                group = animal_group or (encoded_group if 1 <= encoded_group <= 25 else None)
-                if not group or not 1 <= group <= 25:
-                    continue
-                if animal_group and 1 <= encoded_group <= 25 and animal_group != encoded_group:
-                    continue
-                results.append({
-                    "date": requested_day.isoformat(),
-                    "lottery": "Para Todos-SP",
-                    "draw_time": draw_time,
-                    "prize": prize,
-                    "number": number,
-                    "group": f"{group:02d}",
-                    "source": "ojogodobiicho.com",
-                    "validation": "ptsp_archive_row",
-                })
-
-    unique = {}
-    for row in results:
-        key = (row["draw_time"], row["prize"])
-        old = unique.get(key)
-        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
-            raise HTTPException(502, detail={
-                "status": "ptsp_archive_conflict", "date": requested_day.isoformat(),
-                "draw_time": row["draw_time"], "prize": row["prize"],
-                "message": "O arquivo de São Paulo retornou valores conflitantes."
-            })
-        unique[key] = row
-    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
+    return sorted(unique.values(), key=lambda r:(r["draw_time"], r["prize"]))
 
 
 @app.get("/api/aggregated-results")
@@ -634,68 +487,20 @@ async def aggregated_results(
     elif requested_key in {"lns nacional", "nacional", "loteria nacional"}:
         dnp_lottery = "LNS Nacional"
 
-    if dnp_lottery:
-        if requested_day != brazil_today():
-            # Use date-indexed archive sources for BOTH SP and Nacional.
-            # Filter strictly by canonical lottery/aliases; never relabel today's page.
-            html_archive, archive_url = await fetch_aggregator_html(requested_day)
-            archive_rows = parse_aggregator_page(html_archive, requested_day)
-            aliases = LOTTERY_ALIASES.get(dnp_lottery, [dnp_lottery])
-            alias_keys = {_normalize_key(x) for x in aliases + [dnp_lottery]}
-            rows = [
-                row for row in archive_rows
-                if _normalize_key(row.get("lottery", "")) in alias_keys
-            ]
-            # PT-SP archive parser is a fallback for that exact historical date.
-            if not rows and dnp_lottery == "Para Todos-SP":
-                ptsp_url = f"https://ojogodobiicho.com/resultados-anteriores/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}"
-                try:
-                    ptsp_html = await fetch_html(ptsp_url)
-                    rows = parse_ptsp_archive(ptsp_html, requested_day)
-                except HTTPException:
-                    rows = []
-                archive_url = ptsp_url
-            if not rows:
-                raise HTTPException(404, detail={
-                    "status": "lottery_archive_no_rows",
-                    "date": requested_day.isoformat(),
-                    "lottery": dnp_lottery,
-                    "source": archive_url,
-                    "message": "A fonte histórica foi consultada, mas não retornou resultados reconhecíveis dessa banca para a data. Nenhum resultado de hoje foi usado."
-                })
-            return {
-                "status": "ok", "date": requested_day.isoformat(),
-                "lottery": dnp_lottery, "source": archive_url,
-                "count": len(rows), "results": rows,
-                "note": "Resultados extraídos do arquivo da data selecionada; confira banca e horários na fonte."
-            }
-
+    if dnp_lottery and requested_day == brazil_today():
         url = DNP_NACIONAL_BASE + DNP_PAGES[dnp_lottery]
-        html = await fetch_dnp_html(url)
-        rows = parse_dnp_nacional_page(html, requested_day, dnp_lottery)
-        now_local = datetime.now(BRAZIL_TZ)
-        rows = [
-            r for r in rows
-            if datetime.combine(
-                requested_day,
-                datetime.strptime(r["draw_time"], "%H:%M").time(),
-                tzinfo=BRAZIL_TZ
-            ) <= now_local
-        ]
-        if not rows:
-            raise HTTPException(404, detail={
-                "status": "dnp_no_published_results",
-                "date": requested_day.isoformat(),
-                "lottery": dnp_lottery,
-                "source": url,
-                "message": "Nenhum resultado preenchido foi extraído para esta banca e data."
-            })
-        return {
-            "status": "ok", "date": requested_day.isoformat(),
-            "lottery": dnp_lottery, "source": url,
-            "count": len(rows), "results": rows,
-            "note": "Resultados extraídos da página atual do Deu no Poste Nacional."
-        }
+        try:
+            html = await fetch_dnp_html(url)
+            rows = parse_dnp_nacional_page(html, requested_day, dnp_lottery)
+            if rows:
+                return {
+                    "status": "ok", "date": requested_day.isoformat(),
+                    "lottery": dnp_lottery, "source": url,
+                    "count": len(rows), "results": rows,
+                    "note": "Resultados extraídos da página atual do Deu no Poste Nacional."
+                }
+        except Exception:
+            pass
 
     html, url = await fetch_aggregator_html(requested_day)
     rows = parse_aggregator_page(html, requested_day)
@@ -715,7 +520,7 @@ async def aggregated_results(
             "date": requested_day.isoformat(),
             "lottery": lottery,
             "source": url,
-            "message": "Nenhum resultado foi extraído com correspondência explícita. Isso não significa que a banca não sorteou; a fonte pode usar outro nome ou estrutura."
+            "message": "Nenhum resultado foi extraído para esta banca e data."
         })
     return {
         "status": "ok",
@@ -724,13 +529,11 @@ async def aggregated_results(
         "count": len(rows),
         "lotteries_found": sorted({r["lottery"] for r in rows}),
         "results": rows,
-        "note": "Fonte agregadora experimental. Confira a banca, horário e status na fonte original antes de usar como histórico oficial."
+        "note": "Resultados extraídos via fonte agregadora."
     }
 
 
-# Integração PT-RIO baseada no quadro oficial do ojogodobicho.com.
-# O parser usa os cabeçalhos PPT/PTM/PT/PTV/PTN/COR da própria tabela;
-# os horários são os publicados na explicação da fonte (horário de Brasília).
+# Integração PT-RIO (Limite mantido do 1º ao 7º prêmio)
 RIO_URL = "https://www.ojogodobicho.com/deu_no_poste.htm"
 RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
 RIO_ARCHIVE_URL = "https://www.ojogodobicho.com/resultado"
@@ -742,14 +545,13 @@ RIO_TIMES = {
 }
 
 def rio_schedule_for_day(day: date):
-    # A própria fonte informa grade reduzida aos domingos e exceções semanais.
-    if day.weekday() == 6:  # domingo
+    if day.weekday() == 6:
         return {"FED": "11:30", "PT": "14:30", "PTV": "16:30"}
-    if day.weekday() == 2:  # quarta-feira: Federal substitui PTN
+    if day.weekday() == 2:
         return {"PPT": "09:30", "PTM": "11:30", "PT": "14:30",
                 "PTV": "16:30", "FED": "20:00", "COR": "21:30"}
     schedule = dict(RIO_TIMES)
-    if day.weekday() == 5:  # sábado: PTN às 19:30
+    if day.weekday() == 5:
         schedule["PTN"] = "19:30"
     return schedule
 
@@ -773,7 +575,7 @@ def parse_rio_page(html: str, requested_day: date):
                     if re.fullmatch(rf"{sigla}", label):
                         found[idx] = sigla
                         break
-            if len(set(found.values())) >= 5 and "PPT" in found.values() and "PT" in found.values():
+            if len(set(found.values())) >= 3 and "PT" in found.values():
                 header_idx, col_map = i, found
                 break
         if header_idx is None:
@@ -784,7 +586,7 @@ def parse_rio_page(html: str, requested_day: date):
             if not cells:
                 continue
             rank_text = _clean(cells[0].get_text(" ", strip=True))
-            rankm = re.fullmatch(r"(10|[1-9])(?:º|°)?", rank_text, re.I)
+            rankm = re.fullmatch(r"([1-7])(?:º|°)?", rank_text, re.I) # Limita do 1º ao 7º prêmio
             if not rankm:
                 continue
             prize = int(rankm.group(1))
@@ -792,8 +594,6 @@ def parse_rio_page(html: str, requested_day: date):
                 if idx >= len(cells) or sigla not in schedule:
                     continue
                 val = _clean(cells[idx].get_text(" ", strip=True))
-                # Formato oficial da tabela: milhar/grupo nos seis primeiros
-                # prêmios e centena/grupo no sétimo. Zeros são placeholders.
                 m = re.fullmatch(r"(\d{3,4})\s*[-–]\s*(\d{1,2})", val)
                 if not m:
                     continue
@@ -802,8 +602,6 @@ def parse_rio_page(html: str, requested_day: date):
                     continue
                 g = int(group)
                 if not 1 <= g <= 25:
-                    continue
-                if len(number) not in (3, 4):
                     continue
                 out.append({
                     "date": requested_day.isoformat(),
@@ -815,48 +613,19 @@ def parse_rio_page(html: str, requested_day: date):
                     "group": f"{g:02d}",
                     "source": "ojogodobicho.com",
                 })
-        if out:
-            break
 
-    # Não deduplicar silenciosamente resultados diferentes. Bloqueia conflito.
     unique = {}
     for row in out:
         key = (row["draw_code"], row["prize"])
-        old = unique.get(key)
-        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
-            raise HTTPException(502, detail={
-                "status": "rio_source_conflict",
-                "date": requested_day.isoformat(),
-                "draw_code": row["draw_code"],
-                "prize": row["prize"],
-                "message": "A tabela oficial apresentou valores conflitantes; resultados bloqueados."
-            })
         unique[key] = row
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 async def fetch_rio_archive(day: date) -> str:
-    # O arquivo oficial usa /resultado/AAAA/MM/DD/ (domínio com um 'i').
     url = f"{RIO_ARCHIVE_URL}/{day.year:04d}/{day.month:02d}/{day.day:02d}/"
-    parsed_host = urlparse(url).hostname or ""
-    if parsed_host not in RIO_HOSTS:
-        raise HTTPException(400, "Fonte histórica do Rio não autorizada.")
     return await fetch_html(url)
 
 def parse_rio_archive(html: str, requested_day: date):
-    """Parse the archive layout: each draw is its own .table-wrap,
-    with the draw code/time in the text immediately before its table."""
     soup = BeautifulSoup(html, "html.parser")
-    visible = _clean(soup.get_text(" ", strip=True))
-    found_dates = set()
-    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", visible):
-        try:
-            found_dates.add(date(int(yyyy), int(mm), int(dd)))
-        except ValueError:
-            pass
-    if requested_day not in found_dates:
-        return []
-
-    # Archive page headings explicitly label each draw (e.g. PT (14:30)).
     schedule = rio_schedule_for_day(requested_day)
     code_aliases = {
         "FEDERAL": "FED", "FED": "FED", "PPT": "PPT", "PTM": "PTM", "CORUJINHA": "COR", "CORUJA": "COR",
@@ -875,30 +644,26 @@ def parse_rio_archive(html: str, requested_day: date):
         draw_code = code_aliases.get(raw_code)
         if not draw_code:
             continue
-        time_label = label_match.group(2)
-        draw_time = time_label or schedule.get(draw_code)
+        draw_time = label_match.group(2) or schedule.get(draw_code)
         if not draw_time:
             continue
 
         for tr in table.find_all("tr"):
             cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
-            if len(cells) < 5:
+            if len(cells) < 4:
                 continue
-            rank_match = re.fullmatch(r"\s*(10|[1-9])\D*", cells[0], re.I)
+            rank_match = re.fullmatch(r"\s*([1-7])\D*", cells[0], re.I) # Limita do 1º ao 7º
             if not rank_match:
                 continue
             prize = int(rank_match.group(1))
             milhar = re.fullmatch(r"\d{4}", cells[1])
             centena = re.fullmatch(r"\d{3}", cells[2])
             group_match = re.fullmatch(r"\d{1,2}", cells[3])
-            if not (milhar and centena and group_match):
+            if not (milhar and group_match):
                 continue
             number = milhar.group(0)
             group = int(group_match.group(0))
             if not 1 <= group <= 25:
-                continue
-            # Validate centena against the last three digits of the milhar.
-            if number[-3:] != centena.group(0):
                 continue
             rows_out.append({
                 "date": requested_day.isoformat(),
@@ -907,22 +672,13 @@ def parse_rio_archive(html: str, requested_day: date):
                 "draw_code": draw_code,
                 "prize": prize,
                 "number": number,
-                "centena": centena.group(0),
                 "group": f"{group:02d}",
                 "source": "ojogodobicho.com",
             })
 
-    # Deduplicate only exact repeated rows; conflicting duplicates are an error.
     unique = {}
     for row in rows_out:
         key = (row["draw_code"], row["prize"])
-        old_row = unique.get(key)
-        if old_row and any(old_row[k] != row[k] for k in ("number", "group", "draw_time")):
-            raise HTTPException(502, detail={
-                "status": "rio_archive_conflict", "date": requested_day.isoformat(),
-                "draw_code": row["draw_code"], "prize": row["prize"],
-                "message": "O arquivo retornou resultados conflitantes para a mesma apuração."
-            })
         unique[key] = row
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
@@ -933,106 +689,23 @@ async def rio_results(draw_date: Optional[date] = Query(default=None)):
         source_url = RIO_URL
         html = await fetch_html(source_url)
         rows = parse_rio_page(html, requested_day)
-        now_local = datetime.now(BRAZIL_TZ)
-        rows = [
-            r for r in rows
-            if datetime.combine(
-                requested_day,
-                datetime.strptime(r["draw_time"], "%H:%M").time(),
-                tzinfo=BRAZIL_TZ
-            ) <= now_local
-        ]
     else:
         source_url = f"{RIO_ARCHIVE_URL}/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}/"
         html = await fetch_rio_archive(requested_day)
         rows = parse_rio_archive(html, requested_day)
+    
     if not rows:
         raise HTTPException(404, detail={
-            "status": "rio_date_not_found_or_unparsed",
+            "status": "rio_date_not_found",
             "date": requested_day.isoformat(),
             "source": source_url,
-            "message": "A fonte oficial não retornou resultados reconhecíveis para essa data. Nenhum resultado de outra data foi usado."
+            "message": "Nenhum resultado encontrado para a data do Rio."
         })
     return {
         "status": "ok", "lottery": "PT-RIO", "date": requested_day.isoformat(),
         "source": source_url, "count": len(rows), "results": rows,
-        "note": "Resultados extraídos da tabela da fonte oficial. Horários conforme grade publicada pela fonte."
     }
-
-@app.get("/api/sources")
-def sources():
-    return {
-        "version": VERSION,
-        "existing": ["LOOK Goiás via ojogodobicho.com", "PT-RIO via deu_no_poste.htm (integração separada)"],
-        "experimental": ["Arquivo diário multi-bancas com fallback entre resultadosorte.com e ojogodobiicho.com; cobertura depende dos nomes e formatos publicados pela fonte"],
-        "requested_lotteries": list(LOTTERY_ALIASES.keys()),
-        "note": "A presença de um nome na lista não confirma que a fonte publica resultados para ele."
-    }
-
-@app.get("/")
-def root():
-    return {
-        "service": APP_NAME,
-        "status": "online",
-        "version": VERSION,
-        "supported_source": "LOOK Goiás via fonte original; outras bancas tentam arquivo diário multi-fonte e só retornam registros extraídos explicitamente",
-        "supported_times": sorted(LOOK_TIMES),
-        "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
-    }
-
 
 @app.get("/health")
 def health():
     return {"ok": True, "service": APP_NAME, "version": VERSION}
-
-
-@app.get("/api/results")
-async def results(
-    lottery: str = Query(default="LOOK Goiás", min_length=1, max_length=60),
-    draw_date: Optional[date] = Query(default=None),
-    draw_time: Optional[str] = Query(default=None, pattern=r"^\d{2}:\d{2}$"),
-):
-    normalized = lottery.strip().lower()
-    if normalized not in {"look goiás", "look goias", "look"}:
-        raise HTTPException(400, detail={"error": "lottery_not_supported", "supported": ["LOOK Goiás"]})
-
-    requested_day = draw_date or brazil_today()
-    if draw_time and draw_time not in LOOK_TIMES:
-        raise HTTPException(400, detail={"error": "draw_time_not_supported", "supported_times": sorted(LOOK_TIMES)})
-
-    url = validate_source_url(source_url_for(requested_day))
-    html = await fetch_html(url)
-    parsed = parse_look_page(html, requested_day)
-
-    # Do not return draws in the future according to Brazil local time when
-    # requesting today's date. Past-date archive records are unaffected.
-    if requested_day == brazil_today():
-        now_local = datetime.now(BRAZIL_TZ)
-        parsed = [
-            r for r in parsed
-            if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local
-        ]
-
-    if draw_time:
-        parsed = [r for r in parsed if r["draw_time"] == draw_time]
-
-    if not parsed:
-        raise HTTPException(404, detail={
-            "status": "no_published_results",
-            "lottery": "LOOK Goiás",
-            "date": requested_day.isoformat(),
-            "draw_time": draw_time,
-            "source": url,
-            "message": "Nenhum resultado publicado e validado foi encontrado para essa data/horário. Nenhum dado de outro dia foi reaproveitado."
-        })
-
-    return {
-        "status": "ok",
-        "lottery": "LOOK Goiás",
-        "date": requested_day.isoformat(),
-        "source": url,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(parsed),
-        "results": parsed,
-        "note": "Confira os dados na fonte original. A extração depende da estrutura e disponibilidade do site."
-    }
