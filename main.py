@@ -498,8 +498,9 @@ RIO_ARCHIVE_TIMES = {
 }
 
 async def fetch_rio_archive(day: date) -> str:
-    # Fonte distinta da LOOK; a data é explícita para impedir mistura entre dias.
-    url = f"{RIO_ARCHIVE_URL}?date={day.isoformat()}"
+    # O arquivo PT-RIO usa URL amigável por data, não o parâmetro ?date=.
+    # Exemplo documentado: /resultados-anteriores/2026/07/21
+    url = f"{RIO_ARCHIVE_URL}/{day.year:04d}/{day.month:02d}/{day.day:02d}"
     parsed_host = urlparse(url).hostname or ""
     if parsed_host not in RIO_HOSTS:
         raise HTTPException(400, "Fonte histórica do Rio não autorizada.")
@@ -561,7 +562,7 @@ async def rio_results(draw_date: Optional[date] = Query(default=None)):
         now_local = datetime.now(BRAZIL_TZ)
         rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
     else:
-        source_url = f"{RIO_ARCHIVE_URL}?date={requested_day.isoformat()}"
+        source_url = f"{RIO_ARCHIVE_URL}/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}"
         html = await fetch_rio_archive(requested_day)
         rows = parse_rio_archive(html, requested_day)
     if not rows:
