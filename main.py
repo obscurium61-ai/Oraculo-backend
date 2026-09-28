@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.7.0"
+VERSION = "0.5.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -206,36 +206,27 @@ def brazil_today() -> date:
 # Mantém a integração original da LOOK intacta. Esta rota é separada para
 # validar o formato do agregador antes de substituir qualquer integração.
 # ---------------------------------------------------------------------------
-AGGREGATOR_BASES = [
-    # Archive provider referenced in the app's research notes; keep a fallback
-    # to the previous provider so one missing date route does not immediately fail.
-    "https://resultadosorte.com/arquivo",
-    "https://ojogodobiicho.com/resultados-anteriores",
-]
-AGGREGATOR_HOSTS = {"resultadosorte.com", "www.resultadosorte.com", "ojogodobiicho.com", "www.ojogodobiicho.com"}
+AGGREGATOR_BASE = "https://ojogodobiicho.com/resultados-anteriores"
+AGGREGATOR_HOSTS = {"ojogodobiicho.com", "www.ojogodobiicho.com"}
 
 # Aliases intencionais: só associe um nome se houver correspondência conhecida.
 # Os nomes não encontrados continuam aparecendo como ausentes, nunca inventados.
 LOTTERY_ALIASES = {
     "PT-RIO": ["PT Rio", "PT-RIO", "PT Rio RJ"],
-    "Bahia-BA": ["Bahia", "Bahia (Maluca)", "Maluca Bahia", "Paratodos Bahia"],
-    "Para Todos-SP": ["PT-SP", "PT SP", "SP10", "SP10 / PT-SP", "Loteria Paulista"],
+    "Bahia-BA": ["Bahia", "Bahia (Maluca)", "Maluca Bahia"],
+    "Para Todos-SP": ["PT-SP", "PT SP", "Loteria Paulista"],
     "LNS Nacional": ["LNS Nacional", "Nacional", "Loteria Nacional"],
     "LOOK Goiás": ["LOOK", "LOOK Goiás", "Look Loterias"],
     "Lotep-PB": ["LOTEP", "Lotep-PB"],
     "Minas-MG": ["Minas", "Minas MG", "Alvorada / Minas Gerais"],
     "LOTECE-CE": ["LOTECE", "Lotece Loteria dos Sonhos", "Paratodos CE"],
     "Para Todos-PB": ["Para Todos PB", "Paratodos PB"],
-    "AVAL-PE": ["AVAL Pernambuco", "AVAL-PE", "Aval"],
+    "AVAL-PE": ["AVAL Pernambuco", "AVAL-PE"],
     "Tradicional-GO": ["Tradicional-GO", "Loteria Tradicional"],
     "Coruja": ["Coruja", "Corujinha", "Malukinha Rio"],
     "Federal": ["Federal", "Loteria Federal"],
     "Capital-SC": ["Capital-SC", "Capital SC"],
-    "Sorte-RS": ["Sorte-RS", "Sorte RS", "Bicho RS", "Resultado Certo", "Loteria Estadual RS"],
-    "Loteria Popular de Pernambuco": ["Loteria Popular de Pernambuco", "Popular de Pernambuco"],
-    "Monte Carlos-PE": ["Monte Carlos", "Monte Carlos PE"],
-    "Aliança-PE": ["Aliança", "Alianca PE"],
-    "LBR": ["LBR"],
+    "Sorte-RS": ["Sorte-RS", "Sorte RS", "Bicho RS"],
 }
 
 def _normalize_key(value: str) -> str:
@@ -257,54 +248,41 @@ def validate_aggregator_url(url: str) -> str:
     return url
 
 async def fetch_aggregator_html(day: date) -> tuple[str, str]:
-    urls = [
-        f"{AGGREGATOR_BASES[0]}/{day.isoformat()}/",
-        f"{AGGREGATOR_BASES[1]}/{day.year:04d}/{day.month:02d}/{day.day:02d}",
-        f"{AGGREGATOR_BASES[1]}/{day.year:04d}/{day.month:02d}/{day.day:02d}/",
-    ]
+    url = f"{AGGREGATOR_BASE}/{day.year:04d}/{day.month:02d}/{day.day:02d}"
+    validate_aggregator_url(url)
+    key = hashlib.sha256(url.encode()).hexdigest()
+    now = time.time()
+    cached = CACHE.get(key)
+    if cached and now - cached["at"] < CACHE_TTL:
+        return cached["html"], url
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (compatible; OraculoResultsBridge/0.5; results parser)",
         "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
     }
-    errors = []
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
-        for url in urls:
-            validate_aggregator_url(url)
-            key = hashlib.sha256(url.encode()).hexdigest()
-            cached = CACHE.get(key)
-            if cached and time.time() - cached["at"] < CACHE_TTL:
-                return cached["html"], url
-            try:
-                response = await client.get(url)
-                if response.status_code == 404:
-                    errors.append(f"{url}: arquivo não encontrado")
-                    continue
-                response.raise_for_status()
-                body = response.text or ""
-                if len(body.strip()) < 300:
-                    errors.append(f"{url}: resposta vazia/incompleta")
-                    continue
-                CACHE[key] = {"at": time.time(), "html": body}
-                return body, str(response.url)
-            except httpx.HTTPError as exc:
-                errors.append(f"{url}: {type(exc).__name__}")
-                continue
-    raise HTTPException(404, detail={
-        "status": "archive_date_unavailable",
-        "date": day.isoformat(),
-        "message": "Nenhuma das fontes de arquivo respondeu com uma página para esta data. Isso não confirma ausência de sorteio.",
-        "attempts": errors,
-    })
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            response = await client.get(url)
+            if response.status_code == 404:
+                raise HTTPException(404, detail={
+                    "status": "archive_date_unavailable",
+                    "date": day.isoformat(),
+                    "message": "A fonte não possui arquivo publicado para esta data."
+                })
+            response.raise_for_status()
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Falha ao consultar agregador: {type(exc).__name__}")
+    CACHE[key] = {"at": now, "html": response.text}
+    return response.text, url
 
 def parse_aggregator_page(html: str, requested_day: date):
     """Parse the date-specific board from Ojogodobiicho.
 
     The source's board format shows each bank as a heading and each draw as a
     table: prize ranks are rows, draw times are columns, and cells commonly
-    contain either a six-digit concatenation or a separated four-digit milhar,
-    two-digit group, and optionally the animal name. Only explicit matches
-    with valid groups are accepted.
+    contain a six-digit concatenation (four-digit milhar + two-digit group)
+    followed by the animal name. We only accept that explicit pattern.
     """
     soup = BeautifulSoup(html, "html.parser")
     parsed = []
@@ -369,23 +347,18 @@ def parse_aggregator_page(html: str, requested_day: date):
                 cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
                 # Board cells in the aggregator expose milhar+group as six digits,
                 # e.g. 783108 · Camelo. Require a known animal label too.
-                # Aceita número e grupo juntos ou separados: "783108 · Camelo",
-                # "3126 07 Carneiro", "3126-07" e "3126 — 07 · Carneiro".
-                m = re.search(r"(?<!\\d)(\\d{4})\\s*(?:[-–—·]\\s*|\\s+)(\\d{1,2})(?!\\d)", cell_text)
+                m = re.search(r"(?<!\d)(\d{6})(?!\d)", cell_text)
                 if not m:
                     continue
-                number = m.group(1)
-                group_from_digits = int(m.group(2))
+                six = m.group(1)
+                number, group_from_digits = six[:4], int(six[4:])
+                animal_match = re.search(r"[·•\-]\s*([A-Za-zÀ-ÿ]+)", cell_text)
                 group = group_from_digits if 1 <= group_from_digits <= 25 else None
-                tail = cell_text[m.end():]
-                animal_match = re.search(
-                    r"(?i)\\b(avestruz|águia|aguia|burro|borboleta|cachorro|cabra|carneiro|camelo|cobra|coelho|cavalo|elefante|galo|gato|jacaré|jacare|leão|leao|macaco|porco|pavão|pavao|peru|touro|tigre|urso|veado|vaca)\\b",
-                    tail
-                )
                 if animal_match:
                     animal = _normalize_key(animal_match.group(1)).replace(" ", "")
                     animal_group = animal_to_group.get(animal)
                     if animal_group and group and animal_group != group:
+                        # Source's animal and encoded group disagree: do not guess.
                         continue
                     if animal_group:
                         group = animal_group
@@ -424,9 +397,6 @@ async def aggregated_results(
     requested_day = draw_date or brazil_today()
     html, url = await fetch_aggregator_html(requested_day)
     rows = parse_aggregator_page(html, requested_day)
-    source_host = urlparse(url).hostname or "fonte-externa"
-    for row in rows:
-        row["source"] = source_host
     if lottery:
         target = _normalize_key(lottery)
         rows = [
@@ -457,7 +427,7 @@ def sources():
     return {
         "version": VERSION,
         "existing": ["LOOK Goiás via ojogodobicho.com"],
-        "experimental": ["Arquivo diário multi-bancas com fallback entre resultadosorte.com e ojogodobiicho.com; cobertura depende dos nomes e formatos publicados pela fonte"],
+        "experimental": ["Board por data via ojogodobiicho.com; cobertura depende das bancas publicadas no arquivo"],
         "requested_lotteries": list(LOTTERY_ALIASES.keys()),
         "note": "A presença de um nome na lista não confirma que a fonte publica resultados para ele."
     }
@@ -468,7 +438,7 @@ def root():
         "service": APP_NAME,
         "status": "online",
         "version": VERSION,
-        "supported_source": "LOOK Goiás via fonte original; outras bancas tentam arquivo diário multi-fonte e só retornam registros extraídos explicitamente",
+        "supported_source": "LOOK Goiás via fonte original; demais bancas extraídas experimentalmente do board por data Ojogodobiicho",
         "supported_times": sorted(LOOK_TIMES),
         "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
     }
