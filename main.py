@@ -445,7 +445,7 @@ async def aggregated_results(
 
 # Integração isolada do PT-RIO pela página solicitada. Não altera o parser/rota LOOK.
 RIO_URL = "https://www.ojogodobicho.com/deu_no_poste.htm"
-RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
+RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com"}
 RIO_TIMES = {"PPT":"09:20", "PTM":"11:20", "PT":"14:20", "PTV":"16:20", "PTN":"18:20", "COR":"21:20"}
 
 def parse_rio_page(html: str, requested_day: date):
@@ -489,19 +489,84 @@ def parse_rio_page(html: str, requested_day: date):
     unique={(r['draw_time'],r['prize']):r for r in out}
     return sorted(unique.values(), key=lambda r:(r['draw_time'],r['prize']))
 
+# Arquivo diário separado para o Rio. A fonte de arquivo publica os boards fechados por data.
+RIO_ARCHIVE_URL = "https://ojogodobiicho.com/resultados-anteriores"
+RIO_ARCHIVE_TIMES = {
+    "PPT": "09:20", "PTM": "11:20", "PT": "14:20",
+    "PTV": "16:20", "PTN": "18:20", "COR": "21:20",
+    "FED": "20:00"
+}
+
+async def fetch_rio_archive(day: date) -> str:
+    # Fonte distinta da LOOK; a data é explícita para impedir mistura entre dias.
+    url = f"{RIO_ARCHIVE_URL}?date={day.isoformat()}"
+    parsed_host = urlparse(url).hostname or ""
+    if parsed_host not in RIO_HOSTS:
+        raise HTTPException(400, "Fonte histórica do Rio não autorizada.")
+    return await fetch_html(url)
+
+def parse_rio_archive(html: str, requested_day: date):
+    soup = BeautifulSoup(html, "html.parser")
+    text = _clean(soup.get_text(" ", strip=True))
+    # Se a página explicita uma data única diferente, falha fechado.
+    date_candidates = set()
+    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", text):
+        try: date_candidates.add(date(int(yyyy), int(mm), int(dd)))
+        except ValueError: pass
+    if len(date_candidates) == 1 and requested_day not in date_candidates:
+        return []
+
+    out = []
+    # A página arquivada organiza o bloco da banca PT-RIO e cada sorteio em uma linha.
+    # Aceita células contendo milhar e grupo separados por hífen ou ponto médio.
+    for table in soup.find_all("table"):
+        preceding = table.find_previous(['h1','h2','h3','h4','caption'])
+        context = _clean((preceding.get_text(" ", strip=True) if preceding else "") + " " + table.get_text(" ", strip=True)).upper()
+        if "PT-RIO" not in context and "RIO DE JANEIRO" not in context:
+            continue
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["th", "td"])
+            if len(cells) < 8: continue
+            rowtext = [_clean(c.get_text(" ", strip=True)) for c in cells]
+            # Layout: horário/sigla seguido dos sete prêmios.
+            first = rowtext[0].upper().replace(" ", "")
+            code = next((k for k in RIO_ARCHIVE_TIMES if first.startswith(k)), None)
+            if not code:
+                code = next((k for k in RIO_ARCHIVE_TIMES if k in first), None)
+            if not code: continue
+            for prize, val in enumerate(rowtext[1:8], 1):
+                m = re.search(r"(\d{3,6})\s*(?:[-–·|/]\s*)?(\d{1,2})?", val)
+                if not m: continue
+                raw, group = m.groups()
+                # Algumas tabelas juntam milhar e grupo (6 dígitos); outras usam milhar-grupo.
+                if len(raw) == 6 and not group:
+                    number, group = raw[:4], raw[4:]
+                else:
+                    number = raw[-4:].zfill(4)
+                if not group:
+                    group = str(((int(number[-2:]) - 1) // 4) + 1)
+                g = int(group)
+                if not 1 <= g <= 25: continue
+                out.append({"date":requested_day.isoformat(),"lottery":"PT-RIO","draw_time":RIO_ARCHIVE_TIMES[code],"draw_code":code,"prize":prize,"number":number,"group":f"{g:02d}","source":RIO_ARCHIVE_URL})
+    unique={(r["draw_code"],r["prize"]):r for r in out}
+    return sorted(unique.values(), key=lambda r:(r["draw_time"],r["prize"]))
+
 @app.get("/api/rio-results")
 async def rio_results(draw_date: Optional[date] = Query(default=None)):
     requested_day = draw_date or brazil_today()
-    # A URL fornecida é a página corrente. Não a apresentar como histórico de dias passados.
-    if requested_day != brazil_today():
-        raise HTTPException(404, detail={"status":"rio_archive_not_supported","date":requested_day.isoformat(),"message":"Este endpoint usa a página atual do Rio; consulta histórica por data ainda não foi validada."})
-    html = await fetch_html(RIO_URL)
-    rows = parse_rio_page(html, requested_day)
-    now_local = datetime.now(BRAZIL_TZ)
-    rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+    if requested_day == brazil_today():
+        source_url = RIO_URL
+        html = await fetch_html(source_url)
+        rows = parse_rio_page(html, requested_day)
+        now_local = datetime.now(BRAZIL_TZ)
+        rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+    else:
+        source_url = f"{RIO_ARCHIVE_URL}?date={requested_day.isoformat()}"
+        html = await fetch_rio_archive(requested_day)
+        rows = parse_rio_archive(html, requested_day)
     if not rows:
-        raise HTTPException(502, detail={"status":"rio_parse_empty","date":requested_day.isoformat(),"source":RIO_URL,"message":"A página respondeu, mas o quadro Rio não foi reconhecido ou ainda não publicou resultados."})
-    return {"status":"ok","lottery":"PT-RIO","date":requested_day.isoformat(),"source":RIO_URL,"count":len(rows),"results":rows,"note":"Resultados extraídos da página corrente; confira a fonte. Horários e estrutura podem variar."}
+        raise HTTPException(404, detail={"status":"rio_date_not_found_or_unparsed","date":requested_day.isoformat(),"source":source_url,"message":"A fonte histórica não retornou um quadro PT-RIO reconhecível para esta data. Nenhum resultado de outra data foi usado."})
+    return {"status":"ok","lottery":"PT-RIO","date":requested_day.isoformat(),"source":source_url,"count":len(rows),"results":rows,"note":"Resultados extraídos da fonte indicada para a data solicitada; confira a fonte original."}
 
 @app.get("/api/sources")
 def sources():
