@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.9.0"
+VERSION = "1.0.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -523,6 +523,104 @@ def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
         unique[key] = row
     return sorted(unique.values(), key=lambda r:(r["draw_time"],r["prize"]))
 
+
+def parse_ptsp_archive(html: str, requested_day: date):
+    """Parse PT-SP historical archive boards where each row is a draw time
+    and columns 1º..7º are the prize results."""
+    soup = BeautifulSoup(html, "html.parser")
+    page_text = _clean(soup.get_text(" ", strip=True))
+    # If the archive explicitly labels a single date, require an exact match.
+    dates = set()
+    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", page_text):
+        try:
+            dates.add(date(int(yyyy), int(mm), int(dd)))
+        except ValueError:
+            pass
+    if len(dates) == 1 and requested_day not in dates:
+        return []
+
+    animal_to_group = {
+        "avestruz":1,"aguia":2,"burro":3,"borboleta":4,"cachorro":5,
+        "cabra":6,"carneiro":7,"camelo":8,"cobra":9,"coelho":10,
+        "cavalo":11,"elefante":12,"galo":13,"gato":14,"jacare":15,
+        "leao":16,"macaco":17,"porco":18,"pavao":19,"peru":20,
+        "touro":21,"tigre":22,"urso":23,"veado":24,"vaca":25,
+    }
+    results = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        header_idx = None
+        prize_cols = {}
+        for ridx, tr in enumerate(rows[:4]):
+            cells = tr.find_all(["th", "td"])
+            labels = [_clean(c.get_text(" ", strip=True)).lower() for c in cells]
+            if not labels or not any("hor" in label for label in labels[0:1]):
+                continue
+            for cidx, label in enumerate(labels):
+                m = re.search(r"\b([1-7])\s*(?:º|°|o)\b", label, re.I)
+                if m:
+                    prize_cols[cidx] = int(m.group(1))
+            if len(prize_cols) >= 5:
+                header_idx = ridx
+                break
+        if header_idx is None:
+            continue
+
+        for tr in rows[header_idx+1:]:
+            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th","td"])]
+            if len(cells) < 3:
+                continue
+            # Archive first column is e.g. "1º Sorteio 08:00" or "Sorteio 08:00".
+            tm = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", cells[0])
+            if not tm:
+                continue
+            draw_time = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+            for cidx, prize in prize_cols.items():
+                if cidx >= len(cells):
+                    continue
+                cell = cells[cidx]
+                # The archived table publishes milhar+group concatenated, followed by animal.
+                m = re.search(r"(?<!\d)(\d{6})(?!\d)", cell)
+                if not m:
+                    continue
+                six = m.group(1)
+                number, encoded_group = six[:4], int(six[4:])
+                animal_m = re.search(r"[·•\-]\s*([A-Za-zÀ-ÿ]+)", cell)
+                animal_group = None
+                if animal_m:
+                    animal_group = animal_to_group.get(_normalize_key(animal_m.group(1)).replace(" ",""))
+                group = animal_group or (encoded_group if 1 <= encoded_group <= 25 else None)
+                if not group or not 1 <= group <= 25:
+                    continue
+                if animal_group and 1 <= encoded_group <= 25 and animal_group != encoded_group:
+                    continue
+                results.append({
+                    "date": requested_day.isoformat(),
+                    "lottery": "Para Todos-SP",
+                    "draw_time": draw_time,
+                    "prize": prize,
+                    "number": number,
+                    "group": f"{group:02d}",
+                    "source": "ojogodobiicho.com",
+                    "validation": "ptsp_archive_row",
+                })
+
+    unique = {}
+    for row in results:
+        key = (row["draw_time"], row["prize"])
+        old = unique.get(key)
+        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
+            raise HTTPException(502, detail={
+                "status": "ptsp_archive_conflict", "date": requested_day.isoformat(),
+                "draw_time": row["draw_time"], "prize": row["prize"],
+                "message": "O arquivo de São Paulo retornou valores conflitantes."
+            })
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
+
+
 @app.get("/api/aggregated-results")
 async def aggregated_results(
     draw_date: Optional[date] = Query(default=None),
@@ -537,16 +635,33 @@ async def aggregated_results(
         dnp_lottery = "LNS Nacional"
 
     if dnp_lottery:
+        if requested_day != brazil_today() and dnp_lottery == "Para Todos-SP":
+            # Date-specific archive source: /resultados-anteriores/YYYY/MM/DD
+            url = f"https://ojogodobiicho.com/resultados-anteriores/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}"
+            html = await fetch_html(url)
+            rows = parse_ptsp_archive(html, requested_day)
+            rows = [r for r in rows if r["lottery"] == "Para Todos-SP"]
+            if not rows:
+                raise HTTPException(404, detail={
+                    "status":"ptsp_archive_no_rows", "date":requested_day.isoformat(),
+                    "lottery":dnp_lottery, "source":url,
+                    "message":"A página histórica foi consultada, mas não retornou linhas PT-SP reconhecíveis para essa data."
+                })
+            return {
+                "status":"ok", "date":requested_day.isoformat(), "lottery":dnp_lottery,
+                "source":url, "count":len(rows), "results":rows,
+                "note":"Resultados históricos extraídos da tabela PT-SP do arquivo por data. Confira a banca e o horário na fonte."
+            }
+
         url = DNP_NACIONAL_BASE + DNP_PAGES[dnp_lottery]
         html = await fetch_dnp_html(url)
         rows = parse_dnp_nacional_page(html, requested_day, dnp_lottery)
-        # The source page is a current-result page, not a date-indexed archive.
-        # For past dates, refuse to relabel today's results as historical.
+        # The current-result pages are not date-indexed archives.
         if requested_day != brazil_today():
             raise HTTPException(404, detail={
                 "status":"dnp_archive_not_confirmed", "date":requested_day.isoformat(),
                 "lottery":dnp_lottery, "source":url,
-                "message":"Esta página do Deu no Poste Nacional não foi confirmada como arquivo por data; nenhum resultado atual foi atribuído a uma data passada."
+                "message":"O arquivo histórico dessa modalidade ainda não foi confirmado; nenhum resultado atual foi atribuído a uma data passada."
             })
         now_local = datetime.now(BRAZIL_TZ)
         rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
@@ -559,7 +674,7 @@ async def aggregated_results(
         return {
             "status":"ok", "date":requested_day.isoformat(), "lottery":dnp_lottery,
             "source":url, "count":len(rows), "results":rows,
-            "note":"Resultados extraídos da página atual do Deu no Poste Nacional. A página de arquivo por data ainda não foi validada."
+            "note":"Resultados extraídos da página atual do Deu no Poste Nacional."
         }
 
     html, url = await fetch_aggregator_html(requested_day)
@@ -601,9 +716,9 @@ RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
 RIO_ARCHIVE_URL = "https://www.ojogodobicho.com/resultado"
 
 RIO_TIMES = {
-    "PPT": "09:30", "PTM": "11:30", "PT": "14:30",
+    "PPT": "09:20", "PTM": "11:20", "PT": "14:30",
     "PTV": "16:30", "PTN": "18:20", "COR": "21:30",
-    "FED": "20:00",
+    "FED": "11:30",
 }
 
 def rio_schedule_for_day(day: date):
@@ -620,7 +735,7 @@ def rio_schedule_for_day(day: date):
 
 def parse_rio_page(html: str, requested_day: date):
     soup = BeautifulSoup(html, "html.parser")
-    wanted = ["PPT", "PTM", "PT", "PTV", "PTN", "COR"]
+    wanted = ["PPT", "PTM", "PT", "PTV", "PTN", "COR", "FED"]
     out = []
     schedule = rio_schedule_for_day(requested_day)
     for table in soup.find_all("table"):
@@ -725,7 +840,7 @@ def parse_rio_archive(html: str, requested_day: date):
     # Archive page headings explicitly label each draw (e.g. PT (14:30)).
     schedule = rio_schedule_for_day(requested_day)
     code_aliases = {
-        "FEDERAL": "FED", "FED": "FED", "PPT": "PPT", "PTM": "PTM",
+        "FEDERAL": "FED", "FED": "FED", "PPT": "PPT", "PTM": "PTM", "CORUJINHA": "COR", "CORUJA": "COR",
         "PT": "PT", "PTV": "PTV", "PTN": "PTN", "COR": "COR",
     }
     rows_out = []
@@ -734,7 +849,7 @@ def parse_rio_archive(html: str, requested_day: date):
         if not table:
             continue
         wrap_text = _clean(wrap.get_text(" ", strip=True))
-        label_match = re.match(r"\s*(FEDERAL|PPT|PTM|PTV|PTN|PT|COR)\b(?:\s*\((\d{1,2}:\d{2})\))?", wrap_text, re.I)
+        label_match = re.match(r"\s*(FEDERAL|PPT|PTM|PTV|PTN|PT|CORUJINHA|CORUJA|COR)\b(?:\s*\((\d{1,2}:\d{2})\))?", wrap_text, re.I)
         if not label_match:
             continue
         raw_code = label_match.group(1).upper()
@@ -750,7 +865,7 @@ def parse_rio_archive(html: str, requested_day: date):
             cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
             if len(cells) < 5:
                 continue
-            rank_match = re.fullmatch(r"\s*([1-5])\D*", cells[0], re.I)
+            rank_match = re.fullmatch(r"\s*([1-7])\D*", cells[0], re.I)
             if not rank_match:
                 continue
             prize = int(rank_match.group(1))
