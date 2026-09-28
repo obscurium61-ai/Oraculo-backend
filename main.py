@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.5.0"
+VERSION = "0.7.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -206,8 +206,13 @@ def brazil_today() -> date:
 # Mantém a integração original da LOOK intacta. Esta rota é separada para
 # validar o formato do agregador antes de substituir qualquer integração.
 # ---------------------------------------------------------------------------
-AGGREGATOR_BASE = "https://ojogodobiicho.com/resultados-anteriores"
-AGGREGATOR_HOSTS = {"ojogodobiicho.com", "www.ojogodobiicho.com"}
+AGGREGATOR_BASES = [
+    # Archive provider referenced in the app's research notes; keep a fallback
+    # to the previous provider so one missing date route does not immediately fail.
+    "https://resultadosorte.com/arquivo",
+    "https://ojogodobiicho.com/resultados-anteriores",
+]
+AGGREGATOR_HOSTS = {"resultadosorte.com", "www.resultadosorte.com", "ojogodobiicho.com", "www.ojogodobiicho.com"}
 
 # Aliases intencionais: só associe um nome se houver correspondência conhecida.
 # Os nomes não encontrados continuam aparecendo como ausentes, nunca inventados.
@@ -248,33 +253,45 @@ def validate_aggregator_url(url: str) -> str:
     return url
 
 async def fetch_aggregator_html(day: date) -> tuple[str, str]:
-    url = f"{AGGREGATOR_BASE}/{day.year:04d}/{day.month:02d}/{day.day:02d}"
-    validate_aggregator_url(url)
-    key = hashlib.sha256(url.encode()).hexdigest()
-    now = time.time()
-    cached = CACHE.get(key)
-    if cached and now - cached["at"] < CACHE_TTL:
-        return cached["html"], url
+    urls = [
+        f"{AGGREGATOR_BASES[0]}/{day.isoformat()}/",
+        f"{AGGREGATOR_BASES[1]}/{day.year:04d}/{day.month:02d}/{day.day:02d}",
+        f"{AGGREGATOR_BASES[1]}/{day.year:04d}/{day.month:02d}/{day.day:02d}/",
+    ]
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; OraculoResultsBridge/0.5; results parser)",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
     }
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
-            response = await client.get(url)
-            if response.status_code == 404:
-                raise HTTPException(404, detail={
-                    "status": "archive_date_unavailable",
-                    "date": day.isoformat(),
-                    "message": "A fonte não possui arquivo publicado para esta data."
-                })
-            response.raise_for_status()
-    except HTTPException:
-        raise
-    except httpx.HTTPError as exc:
-        raise HTTPException(502, f"Falha ao consultar agregador: {type(exc).__name__}")
-    CACHE[key] = {"at": now, "html": response.text}
-    return response.text, url
+    errors = []
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+        for url in urls:
+            validate_aggregator_url(url)
+            key = hashlib.sha256(url.encode()).hexdigest()
+            cached = CACHE.get(key)
+            if cached and time.time() - cached["at"] < CACHE_TTL:
+                return cached["html"], url
+            try:
+                response = await client.get(url)
+                if response.status_code == 404:
+                    errors.append(f"{url}: arquivo não encontrado")
+                    continue
+                response.raise_for_status()
+                body = response.text or ""
+                if len(body.strip()) < 300:
+                    errors.append(f"{url}: resposta vazia/incompleta")
+                    continue
+                CACHE[key] = {"at": time.time(), "html": body}
+                return body, str(response.url)
+            except httpx.HTTPError as exc:
+                errors.append(f"{url}: {type(exc).__name__}")
+                continue
+    raise HTTPException(404, detail={
+        "status": "archive_date_unavailable",
+        "date": day.isoformat(),
+        "message": "Nenhuma das fontes de arquivo respondeu com uma página para esta data. Isso não confirma ausência de sorteio.",
+        "attempts": errors,
+    })
 
 def parse_aggregator_page(html: str, requested_day: date):
     """Parse the date-specific board from Ojogodobiicho.
@@ -397,6 +414,9 @@ async def aggregated_results(
     requested_day = draw_date or brazil_today()
     html, url = await fetch_aggregator_html(requested_day)
     rows = parse_aggregator_page(html, requested_day)
+    source_host = urlparse(url).hostname or "fonte-externa"
+    for row in rows:
+        row["source"] = source_host
     if lottery:
         target = _normalize_key(lottery)
         rows = [
@@ -422,12 +442,73 @@ async def aggregated_results(
         "note": "Fonte agregadora experimental. Confira a banca, horário e status na fonte original antes de usar como histórico oficial."
     }
 
+
+# Integração isolada do PT-RIO pela página solicitada. Não altera o parser/rota LOOK.
+RIO_URL = "https://www.ojogodobicho.com/deu_no_poste.htm"
+RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
+RIO_TIMES = {"PPT":"09:20", "PTM":"11:20", "PT":"14:20", "PTV":"16:20", "PTN":"18:20", "COR":"21:20"}
+
+def parse_rio_page(html: str, requested_day: date):
+    soup = BeautifulSoup(html, "html.parser")
+    # O quadro Rio é reconhecido pelo cabeçalho com as seis siglas, em ordem.
+    wanted = ["PPT", "PTM", "PT", "PTV", "PTN", "COR"]
+    out = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2: continue
+        header_idx = None
+        for i, tr in enumerate(rows[:4]):
+            labels = [_clean(c.get_text(" ", strip=True)).upper() for c in tr.find_all(["th", "td"])]
+            joined = " ".join(labels)
+            if all(re.search(rf"\b{x}\b", joined) for x in wanted):
+                header_idx = i; break
+        if header_idx is None: continue
+        header_cells = rows[header_idx].find_all(["th", "td"])
+        col_map = {}
+        for idx, cell in enumerate(header_cells):
+            label = _clean(cell.get_text(" ", strip=True)).upper()
+            for sigla in wanted:
+                if re.search(rf"\b{sigla}\b", label): col_map[idx] = sigla
+        if len(col_map) < 6: continue
+        for tr in rows[header_idx+1:]:
+            cells = tr.find_all(["th", "td"])
+            if not cells: continue
+            rankm = re.fullmatch(r"\s*([1-7])\s*(?:º|°)?\s*", _clean(cells[0].get_text(" ", strip=True)))
+            if not rankm: continue
+            prize = int(rankm.group(1))
+            for idx, sigla in col_map.items():
+                if idx >= len(cells): continue
+                val = _clean(cells[idx].get_text(" ", strip=True))
+                m = re.fullmatch(r"(\d{1,4})\s*[-–]\s*(\d{1,2})", val)
+                if not m: continue
+                num, group = m.groups(); g=int(group)
+                if not 1 <= g <= 25: continue
+                out.append({"date":requested_day.isoformat(),"lottery":"PT-RIO","draw_time":RIO_TIMES[sigla],"draw_code":sigla,"prize":prize,"number":num.zfill(4 if prize <= 6 else 3),"group":f"{g:02d}","source":"ojogodobicho.com"})
+        if out: break
+    # bloqueia retorno vazio; não inventa dados nem reaproveita outra data
+    unique={(r['draw_time'],r['prize']):r for r in out}
+    return sorted(unique.values(), key=lambda r:(r['draw_time'],r['prize']))
+
+@app.get("/api/rio-results")
+async def rio_results(draw_date: Optional[date] = Query(default=None)):
+    requested_day = draw_date or brazil_today()
+    # A URL fornecida é a página corrente. Não a apresentar como histórico de dias passados.
+    if requested_day != brazil_today():
+        raise HTTPException(404, detail={"status":"rio_archive_not_supported","date":requested_day.isoformat(),"message":"Este endpoint usa a página atual do Rio; consulta histórica por data ainda não foi validada."})
+    html = await fetch_html(RIO_URL)
+    rows = parse_rio_page(html, requested_day)
+    now_local = datetime.now(BRAZIL_TZ)
+    rows = [r for r in rows if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+    if not rows:
+        raise HTTPException(502, detail={"status":"rio_parse_empty","date":requested_day.isoformat(),"source":RIO_URL,"message":"A página respondeu, mas o quadro Rio não foi reconhecido ou ainda não publicou resultados."})
+    return {"status":"ok","lottery":"PT-RIO","date":requested_day.isoformat(),"source":RIO_URL,"count":len(rows),"results":rows,"note":"Resultados extraídos da página corrente; confira a fonte. Horários e estrutura podem variar."}
+
 @app.get("/api/sources")
 def sources():
     return {
         "version": VERSION,
-        "existing": ["LOOK Goiás via ojogodobicho.com"],
-        "experimental": ["Board por data via ojogodobiicho.com; cobertura depende das bancas publicadas no arquivo"],
+        "existing": ["LOOK Goiás via ojogodobicho.com", "PT-RIO via deu_no_poste.htm (integração separada)"],
+        "experimental": ["Arquivo diário multi-bancas com fallback entre resultadosorte.com e ojogodobiicho.com; cobertura depende dos nomes e formatos publicados pela fonte"],
         "requested_lotteries": list(LOTTERY_ALIASES.keys()),
         "note": "A presença de um nome na lista não confirma que a fonte publica resultados para ele."
     }
@@ -438,7 +519,7 @@ def root():
         "service": APP_NAME,
         "status": "online",
         "version": VERSION,
-        "supported_source": "LOOK Goiás via fonte original; demais bancas extraídas experimentalmente do board por data Ojogodobiicho",
+        "supported_source": "LOOK Goiás via fonte original; outras bancas tentam arquivo diário multi-fonte e só retornam registros extraídos explicitamente",
         "supported_times": sorted(LOOK_TIMES),
         "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
     }
