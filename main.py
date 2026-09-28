@@ -709,8 +709,9 @@ async def fetch_rio_archive(day: date) -> str:
     return await fetch_html(url)
 
 def parse_rio_archive(html: str, requested_day: date):
+    """Parse the archive layout: each draw is its own .table-wrap,
+    with the draw code/time in the text immediately before its table."""
     soup = BeautifulSoup(html, "html.parser")
-    # A página diária arquivada deve identificar a data solicitada.
     visible = _clean(soup.get_text(" ", strip=True))
     found_dates = set()
     for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", visible):
@@ -718,9 +719,78 @@ def parse_rio_archive(html: str, requested_day: date):
             found_dates.add(date(int(yyyy), int(mm), int(dd)))
         except ValueError:
             pass
-    if found_dates and requested_day not in found_dates:
+    if requested_day not in found_dates:
         return []
-    return parse_rio_page(html, requested_day)
+
+    # Archive page headings explicitly label each draw (e.g. PT (14:30)).
+    schedule = rio_schedule_for_day(requested_day)
+    code_aliases = {
+        "FEDERAL": "FED", "FED": "FED", "PPT": "PPT", "PTM": "PTM",
+        "PT": "PT", "PTV": "PTV", "PTN": "PTN", "COR": "COR",
+    }
+    rows_out = []
+    for wrap in soup.select("div.table-wrap"):
+        table = wrap.find("table")
+        if not table:
+            continue
+        wrap_text = _clean(wrap.get_text(" ", strip=True))
+        label_match = re.match(r"\s*(FEDERAL|PPT|PTM|PTV|PTN|PT|COR)\b(?:\s*\((\d{1,2}:\d{2})\))?", wrap_text, re.I)
+        if not label_match:
+            continue
+        raw_code = label_match.group(1).upper()
+        draw_code = code_aliases.get(raw_code)
+        if not draw_code:
+            continue
+        time_label = label_match.group(2)
+        draw_time = time_label or schedule.get(draw_code)
+        if not draw_time:
+            continue
+
+        for tr in table.find_all("tr"):
+            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
+            if len(cells) < 5:
+                continue
+            rank_match = re.fullmatch(r"\s*([1-5])\D*", cells[0], re.I)
+            if not rank_match:
+                continue
+            prize = int(rank_match.group(1))
+            milhar = re.fullmatch(r"\d{4}", cells[1])
+            centena = re.fullmatch(r"\d{3}", cells[2])
+            group_match = re.fullmatch(r"\d{1,2}", cells[3])
+            if not (milhar and centena and group_match):
+                continue
+            number = milhar.group(0)
+            group = int(group_match.group(0))
+            if not 1 <= group <= 25:
+                continue
+            # Validate centena against the last three digits of the milhar.
+            if number[-3:] != centena.group(0):
+                continue
+            rows_out.append({
+                "date": requested_day.isoformat(),
+                "lottery": "PT-RIO",
+                "draw_time": draw_time,
+                "draw_code": draw_code,
+                "prize": prize,
+                "number": number,
+                "centena": centena.group(0),
+                "group": f"{group:02d}",
+                "source": "ojogodobicho.com",
+            })
+
+    # Deduplicate only exact repeated rows; conflicting duplicates are an error.
+    unique = {}
+    for row in rows_out:
+        key = (row["draw_code"], row["prize"])
+        old_row = unique.get(key)
+        if old_row and any(old_row[k] != row[k] for k in ("number", "group", "draw_time")):
+            raise HTTPException(502, detail={
+                "status": "rio_archive_conflict", "date": requested_day.isoformat(),
+                "draw_code": row["draw_code"], "prize": row["prize"],
+                "message": "O arquivo retornou resultados conflitantes para a mesma apuração."
+            })
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 @app.get("/api/rio-results")
 async def rio_results(draw_date: Optional[date] = Query(default=None)):
