@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -218,20 +218,24 @@ AGGREGATOR_HOSTS = {"resultadosorte.com", "www.resultadosorte.com", "ojogodobiic
 # Os nomes não encontrados continuam aparecendo como ausentes, nunca inventados.
 LOTTERY_ALIASES = {
     "PT-RIO": ["PT Rio", "PT-RIO", "PT Rio RJ"],
-    "Bahia-BA": ["Bahia", "Bahia (Maluca)", "Maluca Bahia"],
-    "Para Todos-SP": ["PT-SP", "PT SP", "Loteria Paulista"],
+    "Bahia-BA": ["Bahia", "Bahia (Maluca)", "Maluca Bahia", "Paratodos Bahia"],
+    "Para Todos-SP": ["PT-SP", "PT SP", "SP10", "SP10 / PT-SP", "Loteria Paulista"],
     "LNS Nacional": ["LNS Nacional", "Nacional", "Loteria Nacional"],
     "LOOK Goiás": ["LOOK", "LOOK Goiás", "Look Loterias"],
     "Lotep-PB": ["LOTEP", "Lotep-PB"],
     "Minas-MG": ["Minas", "Minas MG", "Alvorada / Minas Gerais"],
     "LOTECE-CE": ["LOTECE", "Lotece Loteria dos Sonhos", "Paratodos CE"],
     "Para Todos-PB": ["Para Todos PB", "Paratodos PB"],
-    "AVAL-PE": ["AVAL Pernambuco", "AVAL-PE"],
+    "AVAL-PE": ["AVAL Pernambuco", "AVAL-PE", "Aval"],
     "Tradicional-GO": ["Tradicional-GO", "Loteria Tradicional"],
     "Coruja": ["Coruja", "Corujinha", "Malukinha Rio"],
     "Federal": ["Federal", "Loteria Federal"],
     "Capital-SC": ["Capital-SC", "Capital SC"],
-    "Sorte-RS": ["Sorte-RS", "Sorte RS", "Bicho RS"],
+    "Sorte-RS": ["Sorte-RS", "Sorte RS", "Bicho RS", "Resultado Certo", "Loteria Estadual RS"],
+    "Loteria Popular de Pernambuco": ["Loteria Popular de Pernambuco", "Popular de Pernambuco"],
+    "Monte Carlos-PE": ["Monte Carlos", "Monte Carlos PE"],
+    "Aliança-PE": ["Aliança", "Alianca PE"],
+    "LBR": ["LBR"],
 }
 
 def _normalize_key(value: str) -> str:
@@ -298,8 +302,9 @@ def parse_aggregator_page(html: str, requested_day: date):
 
     The source's board format shows each bank as a heading and each draw as a
     table: prize ranks are rows, draw times are columns, and cells commonly
-    contain a six-digit concatenation (four-digit milhar + two-digit group)
-    followed by the animal name. We only accept that explicit pattern.
+    contain either a six-digit concatenation or a separated four-digit milhar,
+    two-digit group, and optionally the animal name. Only explicit matches
+    with valid groups are accepted.
     """
     soup = BeautifulSoup(html, "html.parser")
     parsed = []
@@ -364,18 +369,23 @@ def parse_aggregator_page(html: str, requested_day: date):
                 cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
                 # Board cells in the aggregator expose milhar+group as six digits,
                 # e.g. 783108 · Camelo. Require a known animal label too.
-                m = re.search(r"(?<!\d)(\d{6})(?!\d)", cell_text)
+                # Aceita número e grupo juntos ou separados: "783108 · Camelo",
+                # "3126 07 Carneiro", "3126-07" e "3126 — 07 · Carneiro".
+                m = re.search(r"(?<!\\d)(\\d{4})\\s*(?:[-–—·]\\s*|\\s+)(\\d{1,2})(?!\\d)", cell_text)
                 if not m:
                     continue
-                six = m.group(1)
-                number, group_from_digits = six[:4], int(six[4:])
-                animal_match = re.search(r"[·•\-]\s*([A-Za-zÀ-ÿ]+)", cell_text)
+                number = m.group(1)
+                group_from_digits = int(m.group(2))
                 group = group_from_digits if 1 <= group_from_digits <= 25 else None
+                tail = cell_text[m.end():]
+                animal_match = re.search(
+                    r"(?i)\\b(avestruz|águia|aguia|burro|borboleta|cachorro|cabra|carneiro|camelo|cobra|coelho|cavalo|elefante|galo|gato|jacaré|jacare|leão|leao|macaco|porco|pavão|pavao|peru|touro|tigre|urso|veado|vaca)\\b",
+                    tail
+                )
                 if animal_match:
                     animal = _normalize_key(animal_match.group(1)).replace(" ", "")
                     animal_group = animal_to_group.get(animal)
                     if animal_group and group and animal_group != group:
-                        # Source's animal and encoded group disagree: do not guess.
                         continue
                     if animal_group:
                         group = animal_group
