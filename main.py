@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "0.4.1-test"
+VERSION = "0.5.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -206,31 +206,27 @@ def brazil_today() -> date:
 # Mantém a integração original da LOOK intacta. Esta rota é separada para
 # validar o formato do agregador antes de substituir qualquer integração.
 # ---------------------------------------------------------------------------
-AGGREGATOR_BASE = "https://resultadosorte.com/arquivo"
-AGGREGATOR_HOSTS = {"resultadosorte.com", "www.resultadosorte.com"}
+AGGREGATOR_BASE = "https://ojogodobiicho.com/resultados-anteriores"
+AGGREGATOR_HOSTS = {"ojogodobiicho.com", "www.ojogodobiicho.com"}
 
 # Aliases intencionais: só associe um nome se houver correspondência conhecida.
 # Os nomes não encontrados continuam aparecendo como ausentes, nunca inventados.
 LOTTERY_ALIASES = {
-    # Nomes canônicos usados pelo HTML, associados aos rótulos que a fonte
-    # Resultado Sorte efetivamente apresenta no arquivo.
-    "PT-RIO": ["PT Rio", "PT-RIO", "PT Rio RJ", "Resultado da PT Rio"],
-    "Bahia-BA": ["Paratodos Bahia", "Bahia", "Bahia-BA", "Paratodos BA"],
-    "Para Todos-SP": ["SP10 / PT-SP", "PT-SP", "PT SP", "Loteria Paulista", "SP10"],
-    "LNS Nacional": ["Loteria Nacional", "LNS Nacional", "Nacional"],
-    "LOOK Goiás": ["Look Loterias", "LOOK", "LOOK Goiás", "Look Loterias GO"],
-    "Lotep-PB": ["LOTEP", "Lotep-PB", "Loteria do Estado da Paraíba"],
-    "Minas-MG": ["Minas", "Minas MG", "Minas Gerais", "Alvorada / Minas Gerais"],
-    "LOTECE-CE": ["Lotece — Loteria dos Sonhos", "LOTECE", "Lotece", "Loteria dos Sonhos"],
-    "Para Todos-PB": ["Paratodos PB", "Para Todos PB", "Para Todos-PB"],
-    "AVAL-PE": ["Aval", "AVAL", "AVAL Pernambuco", "AVAL-PE"],
-    "Tradicional-GO": ["Tradicional-GO", "Loteria Tradicional", "Tradicional Goiás"],
-    # Corujinha é um horário/extração dentro da grade PT Rio, não uma banca
-    # autônoma nessa fonte; não associar automaticamente à banca Coruja.
-    "Coruja": ["Coruja"],
-    "Federal": ["Loteria Federal", "Federal"],
-    "Capital-SC": ["Capital-SC", "Capital SC", "Capital Santa Catarina"],
-    "Sorte-RS": ["Resultado Certo / Loteria Estadual RS", "Resultado Certo", "Loteria Estadual RS", "Sorte-RS", "Sorte RS", "Bicho RS"],
+    "PT-RIO": ["PT Rio", "PT-RIO", "PT Rio RJ"],
+    "Bahia-BA": ["Bahia", "Bahia (Maluca)", "Maluca Bahia"],
+    "Para Todos-SP": ["PT-SP", "PT SP", "Loteria Paulista"],
+    "LNS Nacional": ["LNS Nacional", "Nacional", "Loteria Nacional"],
+    "LOOK Goiás": ["LOOK", "LOOK Goiás", "Look Loterias"],
+    "Lotep-PB": ["LOTEP", "Lotep-PB"],
+    "Minas-MG": ["Minas", "Minas MG", "Alvorada / Minas Gerais"],
+    "LOTECE-CE": ["LOTECE", "Lotece Loteria dos Sonhos", "Paratodos CE"],
+    "Para Todos-PB": ["Para Todos PB", "Paratodos PB"],
+    "AVAL-PE": ["AVAL Pernambuco", "AVAL-PE"],
+    "Tradicional-GO": ["Tradicional-GO", "Loteria Tradicional"],
+    "Coruja": ["Coruja", "Corujinha", "Malukinha Rio"],
+    "Federal": ["Federal", "Loteria Federal"],
+    "Capital-SC": ["Capital-SC", "Capital SC"],
+    "Sorte-RS": ["Sorte-RS", "Sorte RS", "Bicho RS"],
 }
 
 def _normalize_key(value: str) -> str:
@@ -252,7 +248,7 @@ def validate_aggregator_url(url: str) -> str:
     return url
 
 async def fetch_aggregator_html(day: date) -> tuple[str, str]:
-    url = f"{AGGREGATOR_BASE}/{day.isoformat()}/"
+    url = f"{AGGREGATOR_BASE}/{day.year:04d}/{day.month:02d}/{day.day:02d}"
     validate_aggregator_url(url)
     key = hashlib.sha256(url.encode()).hexdigest()
     now = time.time()
@@ -260,7 +256,7 @@ async def fetch_aggregator_html(day: date) -> tuple[str, str]:
     if cached and now - cached["at"] < CACHE_TTL:
         return cached["html"], url
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; OraculoResultsBridge/0.4; results parser)",
+        "User-Agent": "Mozilla/5.0 (compatible; OraculoResultsBridge/0.5; results parser)",
         "Accept": "text/html,application/xhtml+xml",
     }
     try:
@@ -281,26 +277,35 @@ async def fetch_aggregator_html(day: date) -> tuple[str, str]:
     return response.text, url
 
 def parse_aggregator_page(html: str, requested_day: date):
+    """Parse the date-specific board from Ojogodobiicho.
+
+    The source's board format shows each bank as a heading and each draw as a
+    table: prize ranks are rows, draw times are columns, and cells commonly
+    contain a six-digit concatenation (four-digit milhar + two-digit group)
+    followed by the animal name. We only accept that explicit pattern.
+    """
     soup = BeautifulSoup(html, "html.parser")
     parsed = []
     current_bank = None
+    animal_to_group = {
+        "avestruz": 1, "aguia": 2, "burro": 3, "borboleta": 4,
+        "cachorro": 5, "cabra": 6, "carneiro": 7, "camelo": 8,
+        "cobra": 9, "coelho": 10, "cavalo": 11, "elefante": 12,
+        "galo": 13, "gato": 14, "jacare": 15, "leao": 16,
+        "macaco": 17, "porco": 18, "pavao": 19, "peru": 20,
+        "touro": 21, "tigre": 22, "urso": 23, "veado": 24,
+        "vaca": 25,
+    }
 
-    # Walk headings and tables in document order so each table inherits the
-    # immediately preceding bank heading. Only explicitly labelled results pass.
     for node in soup.find_all(["h2", "h3", "h4", "table"]):
         if node.name in {"h2", "h3", "h4"}:
             heading = _clean(node.get_text(" ", strip=True))
-            match = re.search(r"(.+?)(?:\s*[—-]\s*|\s*\()", heading)
-            candidate = match.group(1).strip() if match else heading
             normalized_heading = _normalize_key(heading)
             current_bank = None
-            # Prefer a whole normalized heading or a phrase boundary match.
-            # Match aliases inside descriptive headings such as "Resultado da PT Rio em..."
-            # without allowing short generic words to match unrelated banks.
-            for alias_norm, canonical in sorted(_ALIAS_LOOKUP.items(), key=lambda item: len(item[0]), reverse=True):
-                if not alias_norm:
-                    continue
-                if normalized_heading == alias_norm or re.search(rf"(?<![a-z0-9]){re.escape(alias_norm)}(?![a-z0-9])", normalized_heading):
+            # Prefer the longest matching alias to avoid matching a short name
+            # inside another bank label.
+            for alias_norm, canonical in sorted(_ALIAS_LOOKUP.items(), key=lambda x: len(x[0]), reverse=True):
+                if alias_norm and (normalized_heading == alias_norm or normalized_heading.startswith(alias_norm + " ")):
                     current_bank = canonical
                     break
             continue
@@ -310,40 +315,55 @@ def parse_aggregator_page(html: str, requested_day: date):
         rows = node.find_all("tr")
         if len(rows) < 2:
             continue
-        header_cells = rows[0].find_all(["th", "td"])
+        header_idx = None
         draw_columns = {}
-        for idx, cell in enumerate(header_cells):
-            label = _clean(cell.get_text(" ", strip=True))
-            tm = re.search(r"(\d{1,2}:\d{2})", label)
-            if tm:
-                hh, mm = tm.group(1).split(":")
-                draw_columns[idx] = f"{int(hh):02d}:{mm}"
-
-        if not draw_columns:
+        for ridx, tr in enumerate(rows[:3]):
+            cells = tr.find_all(["th", "td"])
+            found = {}
+            for idx, cell in enumerate(cells):
+                label = _clean(cell.get_text(" ", strip=True))
+                tm = re.search(r"(?<!\d)(\d{1,2}:\d{2})(?!\d)", label)
+                if tm:
+                    hh, mm = tm.group(1).split(":")
+                    found[idx] = f"{int(hh):02d}:{mm}"
+            if found:
+                header_idx, draw_columns = ridx, found
+                break
+        if header_idx is None:
             continue
 
-        for tr in rows[1:]:
+        for tr in rows[header_idx + 1:]:
             cells = tr.find_all(["th", "td"])
             if len(cells) < 2:
                 continue
-            prize_text = _clean(cells[0].get_text(" ", strip=True))
-            pm = re.search(r"\b([1-7])\s*º?\b", prize_text, re.I)
-            if not pm:
+            rank_text = _clean(cells[0].get_text(" ", strip=True))
+            rank_match = re.search(r"^\s*([1-7])\s*(?:º|°|o)?\s*$", rank_text, re.I)
+            if not rank_match:
                 continue
-            prize = int(pm.group(1))
+            prize = int(rank_match.group(1))
             for col_idx, draw_time in draw_columns.items():
                 if col_idx >= len(cells):
                     continue
                 cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
-                # Common archive cell: "4395 24 Veado" or "4395-24".
-                nm = re.search(r"(?<!\d)(\d{3,4})\s*(?:[-– ]\s*)?(?:G\s*)?0?(\d{1,2})(?:\s|$)", cell_text, re.I)
-                if not nm:
+                # Board cells in the aggregator expose milhar+group as six digits,
+                # e.g. 783108 · Camelo. Require a known animal label too.
+                m = re.search(r"(?<!\d)(\d{6})(?!\d)", cell_text)
+                if not m:
                     continue
-                number_raw, group_raw = nm.groups()
-                group = int(group_raw)
-                if not 1 <= group <= 25:
+                six = m.group(1)
+                number, group_from_digits = six[:4], int(six[4:])
+                animal_match = re.search(r"[·•\-]\s*([A-Za-zÀ-ÿ]+)", cell_text)
+                group = group_from_digits if 1 <= group_from_digits <= 25 else None
+                if animal_match:
+                    animal = _normalize_key(animal_match.group(1)).replace(" ", "")
+                    animal_group = animal_to_group.get(animal)
+                    if animal_group and group and animal_group != group:
+                        # Source's animal and encoded group disagree: do not guess.
+                        continue
+                    if animal_group:
+                        group = animal_group
+                if not group or not 1 <= group <= 25:
                     continue
-                number = number_raw.zfill(4 if prize <= 5 else 3)
                 parsed.append({
                     "date": requested_day.isoformat(),
                     "lottery": current_bank,
@@ -351,27 +371,22 @@ def parse_aggregator_page(html: str, requested_day: date):
                     "prize": prize,
                     "number": number,
                     "group": f"{group:02d}",
-                    "source": "resultadosorte.com",
-                    "validation": "unverified_aggregator",
+                    "source": "ojogodobiicho.com",
+                    "validation": "aggregator_board_extracted",
                 })
 
-    # Avoid silently overwriting conflicting data from duplicate table renderings.
     unique = {}
     for row in parsed:
         key = (row["lottery"], row["draw_time"], row["prize"])
-        if key in unique:
-            old = unique[key]
-            if old["number"] != row["number"] or old["group"] != row["group"]:
-                raise HTTPException(502, detail={
-                    "status": "aggregator_conflict",
-                    "date": requested_day.isoformat(),
-                    "lottery": row["lottery"],
-                    "draw_time": row["draw_time"],
-                    "prize": row["prize"],
-                    "message": "Foram encontrados valores conflitantes; os dados foram bloqueados."
-                })
-        else:
-            unique[key] = row
+        old = unique.get(key)
+        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
+            raise HTTPException(502, detail={
+                "status": "aggregator_conflict", "date": requested_day.isoformat(),
+                "lottery": row["lottery"], "draw_time": row["draw_time"],
+                "prize": row["prize"],
+                "message": "A fonte retornou valores conflitantes; os dados foram bloqueados."
+            })
+        unique[key] = row
     return sorted(unique.values(), key=lambda r: (r["lottery"], r["draw_time"], r["prize"]))
 
 @app.get("/api/aggregated-results")
@@ -412,9 +427,9 @@ def sources():
     return {
         "version": VERSION,
         "existing": ["LOOK Goiás via ojogodobicho.com"],
-        "experimental": ["Resultado Sorte via resultadosorte.com"],
+        "experimental": ["Board por data via ojogodobiicho.com; cobertura depende das bancas publicadas no arquivo"],
         "requested_lotteries": list(LOTTERY_ALIASES.keys()),
-        "note": "A fonte pública atualmente cobre apenas algumas das bancas solicitadas. Bancas ausentes ou sem extração publicada devem ser sinalizadas como indisponíveis, sem inventar resultados. LOOK permanece na rota original validada."
+        "note": "A presença de um nome na lista não confirma que a fonte publica resultados para ele."
     }
 
 @app.get("/")
@@ -423,7 +438,7 @@ def root():
         "service": APP_NAME,
         "status": "online",
         "version": VERSION,
-        "supported_source": "LOOK Goiás validada; agregador Resultado Sorte experimental",
+        "supported_source": "LOOK Goiás via fonte original; demais bancas extraídas experimentalmente do board por data Ojogodobiicho",
         "supported_times": sorted(LOOK_TIMES),
         "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
     }
