@@ -13,11 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "1.3.0"
+VERSION = "1.3.1-candidate"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
-ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com"}
+ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br"}
 CACHE = {}
 LOOK_TIMES = {"07:20", "09:20", "11:20", "14:20", "16:20", "18:20", "21:20", "23:20"}
 
@@ -927,6 +927,67 @@ def parse_rio_archive(html: str, requested_day: date):
         unique[key] = row
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
+RESULTADOFACIL_RIO_BASE = "https://www.resultadofacil.com.br"
+
+
+def parse_resultadofacil_rio(html: str, requested_day: date):
+    """Extract PT-RIO prize tables from Resultado Fácil 1º ao 10º page.
+    Only tables with an explicit PT-RIO/RJ draw heading and numbered prizes are accepted.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    page_text = _clean(soup.get_text(" ", strip=True))
+    # The page must explicitly identify the requested calendar date.
+    date_forms = {f"{requested_day.day:02d}/{requested_day.month:02d}/{requested_day.year}", requested_day.isoformat()}
+    if not any(d in page_text for d in date_forms):
+        return []
+    results = []
+    for table in soup.find_all("table"):
+        # Search nearby preceding heading/section text for a PT-RIO draw label and time.
+        heading_text = ""
+        node = table
+        for _ in range(5):
+            node = node.parent
+            if not node:
+                break
+            heading_text = _clean(node.get_text(" ", strip=True))
+            if re.search(r"PT-RIO.*?\b\d{1,2}:\d{2}\b", heading_text, re.I):
+                break
+        hm = re.search(r"PT-RIO\s*,?\s*RJ\s*,?\s*(\d{1,2}:\d{2})\s*,?\s*([A-Z]+)?", heading_text, re.I)
+        if not hm:
+            continue
+        draw_time = hm.group(1)
+        draw_code = (hm.group(2) or "PT").upper()
+        for tr in table.find_all("tr"):
+            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
+            if len(cells) < 3:
+                continue
+            rank_m = re.fullmatch(r"(10|[1-9])(?:º|°)?", cells[0], re.I)
+            if not rank_m:
+                continue
+            prize = int(rank_m.group(1))
+            number_m = re.fullmatch(r"\d{4}", cells[1])
+            group_m = re.fullmatch(r"\d{1,2}", cells[2])
+            if not number_m or not group_m or not 1 <= int(group_m.group(1)) <= 25:
+                continue
+            row = {"date": requested_day.isoformat(), "lottery": "PT-RIO", "draw_time": draw_time,
+                   "draw_code": draw_code, "prize": prize, "number": number_m.group(0),
+                   "group": f"{int(group_m.group(0)):02d}", "source": "resultadofacil.com.br"}
+            results.append(row)
+    # Reject conflicting duplicate draw/prize entries rather than silently choosing one.
+    unique = {}
+    for row in results:
+        key = (row["draw_time"], row["draw_code"], row["prize"])
+        if key in unique and unique[key]["number"] != row["number"]:
+            raise HTTPException(502, detail={"status":"rio_resultadofacil_conflict", "date":requested_day.isoformat(), "draw":row["draw_time"], "prize":row["prize"]})
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
+
+
+async def fetch_resultadofacil_rio(day: date):
+    url = f"{RESULTADOFACIL_RIO_BASE}/resultados-pt-rio-do-dia-{day.isoformat()}-1ao10"
+    return await fetch_html(url), url
+
+
 @app.get("/api/rio-results")
 async def rio_results(draw_date: Optional[date] = Query(default=None)):
     requested_day = draw_date or brazil_today()
@@ -947,6 +1008,16 @@ async def rio_results(draw_date: Optional[date] = Query(default=None)):
         source_url = f"{RIO_ARCHIVE_URL}/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}/"
         html = await fetch_rio_archive(requested_day)
         rows = parse_rio_archive(html, requested_day)
+        if not rows:
+            try:
+                rf_html, rf_url = await fetch_resultadofacil_rio(requested_day)
+                rf_rows = parse_resultadofacil_rio(rf_html, requested_day)
+                if rf_rows:
+                    rows = rf_rows
+                    source_url = rf_url
+            except HTTPException:
+                # Keep the original archive failure behavior if fallback is unavailable.
+                pass
     if not rows:
         raise HTTPException(404, detail={
             "status": "rio_date_not_found_or_unparsed",
