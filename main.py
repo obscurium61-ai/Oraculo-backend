@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -138,7 +138,7 @@ def parse_look_page(html: str, requested_day: date):
             if not cells:
                 continue
             first = _clean(cells[0].get_text(" ", strip=True))
-            rank_match = re.search(r"^\s*([1-7])\s*(?:º|°|o)?\s*$", first, re.I)
+            rank_match = re.search(r"^\s*(10|[1-9])\s*(?:º|°|o)?\s*$", first, re.I)
             if not rank_match:
                 # Some tables put rank text in a separate first cell or row label.
                 continue
@@ -157,8 +157,9 @@ def parse_look_page(html: str, requested_day: date):
                 group = int(group_raw)
                 if not 1 <= group <= 25:
                     continue
-                # Prizes 1-6 are four-digit derived/result numbers; prize 7 is
-                # three-digit derived. Keep leading zeroes in the source.
+                # Preserve the source number width where possible. The LOOK table
+                # uses four-digit results for prizes 1-6 and three-digit results
+                # for derived prizes 7-10.
                 number = number_raw.zfill(4 if prize <= 6 else 3)
                 results.append({
                     "date": requested_day.isoformat(),
@@ -526,7 +527,7 @@ def parse_dnp_nacional_page(html: str, requested_day: date, lottery: str):
 
 def parse_ptsp_archive(html: str, requested_day: date):
     """Parse PT-SP historical archive boards where each row is a draw time
-    and columns 1º..7º are the prize results."""
+    and columns 1º..10º are the prize results."""
     soup = BeautifulSoup(html, "html.parser")
     page_text = _clean(soup.get_text(" ", strip=True))
     # If the archive explicitly labels a single date, require an exact match.
@@ -559,7 +560,7 @@ def parse_ptsp_archive(html: str, requested_day: date):
             if not labels or not any("hor" in label for label in labels[0:1]):
                 continue
             for cidx, label in enumerate(labels):
-                m = re.search(r"\b([1-7])\s*(?:º|°|o)\b", label, re.I)
+                m = re.search(r"\b(10|[1-9])\s*(?:º|°|o)\b", label, re.I)
                 if m:
                     prize_cols[cidx] = int(m.group(1))
             if len(prize_cols) >= 5:
