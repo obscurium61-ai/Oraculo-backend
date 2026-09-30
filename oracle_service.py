@@ -1,28 +1,129 @@
-"""Oráculo service layer: persistence, synchronization, calibration and learning loop."""
+"""Production Oracle API.
+
+The module keeps the existing result collectors and adds one stable interface
+for the app: frozen daily forecasts, frozen per-draw forecasts, Super Palpitão,
+walk-forward learning, and an automatic cycle.
+"""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import Callable, Optional
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Query
 
-from oracle_engine import calibrate, predict, evaluate_prediction
+from oracle_brain import (
+    ORACLE_SCHEDULES, MODALITY_ALIASES, MODEL_FAMILIES,
+    generate_portfolio, calibrate, evaluate_forecast, row_number, group_of,
+)
 from oracle_store import (
     ensure_schema, database_info, upsert_results, get_results, get_prediction,
-    save_prediction, save_model, load_model, pending_predictions,
-    list_predictions, prediction_counts, result_counts, mark_prediction_evaluated,
-    prediction_has_event, add_prediction_event,
-    log_sync, log_learning_run, canonical_oracle_draw_time,
+    save_prediction, save_model, load_model, list_predictions, prediction_counts,
+    result_counts, mark_prediction_evaluated, prediction_has_event,
+    add_prediction_event, log_sync, log_learning_run, canonical_oracle_draw_time,
 )
 
 ORACLE_LOTTERIES = ["PT-RIO", "Para Todos-SP", "LOOK Goiás", "LNS Nacional"]
-ORACLE_MODALITIES = ["milhar", "centena", "dezena", "grupo", "duque", "terno", "passe"]
+ORACLE_MODALITIES = [
+    "milhar", "palpitao", "centena", "dezena", "grupo",
+    "duque_dezena", "terno_dezena", "terno_grupo", "duque_grupo", "passe_vai"
+]
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 
 
-def _target_cutoff(draw_date: str, draw_time: str) -> str:
+def _now_local() -> datetime:
+    return datetime.now(BRAZIL_TZ)
+
+
+def _cutoff_iso(draw_date: str, draw_time: str) -> str:
     return f"{draw_date}T{draw_time}:00-03:00"
+
+
+def _daily_cutoff(day: date) -> str:
+    return f"{day.isoformat()}T00:00:00-03:00"
+
+
+def _canonical(lottery: str, draw_time: str) -> str:
+    return canonical_oracle_draw_time(lottery, draw_time)
+
+
+def _schedule(lottery: str) -> list[str]:
+    return ORACLE_SCHEDULES[lottery]
+
+
+def _target_exists(lottery: str, draw_date: str, draw_time: str) -> bool:
+    rows = get_results(lottery, limit=5000)
+    target = _canonical(lottery, draw_time)
+    return any(r["draw_date"] == draw_date and _canonical(lottery, r["draw_time"]) == target for r in rows)
+
+
+def _draw_rows(lottery: str, draw_date: str, draw_time: str) -> list[dict]:
+    target = _canonical(lottery, draw_time)
+    rows = get_results(lottery, limit=5000)
+    return [r for r in rows if r["draw_date"] == draw_date and _canonical(lottery, r["draw_time"]) == target]
+
+
+def _previous_draw_requirement(lottery: str, draw_date: date, draw_time: str) -> dict | None:
+    times = _schedule(lottery)
+    target = _canonical(lottery, draw_time)
+    if target not in times:
+        raise HTTPException(400, f"Horário {draw_time} não pertence à programação de {lottery}.")
+    idx = times.index(target)
+    if idx == 0:
+        prev_date = draw_date - timedelta(days=1)
+        prev_time = times[-1]
+    else:
+        prev_date = draw_date
+        prev_time = times[idx-1]
+    rows = _draw_rows(lottery, prev_date.isoformat(), prev_time)
+    if not rows:
+        return None
+    ordered = sorted(rows, key=lambda r: int(r.get("prize") or 999))
+    return {"date": prev_date.isoformat(), "time": prev_time, "rows": ordered}
+
+
+def _moment_from_draw(draw: dict | None) -> dict:
+    if not draw:
+        return {"groups": {}, "first_group": None, "first_tail": None, "name": None}
+    groups: dict[str, float] = {}
+    ordered = sorted(draw["rows"], key=lambda r: int(r.get("prize") or 999))[:5]
+    for r in ordered:
+        n = row_number(r)
+        g = int(r.get("group") or r.get("group_code") or group_of(n))
+        w = 3.5 if int(r.get("prize") or 0) == 1 else 1.0
+        groups[str(g)] = groups.get(str(g), 0) + w
+    first = ordered[0] if ordered else None
+    return {
+        "groups": groups,
+        "first_group": int(first.get("group") or first.get("group_code") or group_of(row_number(first))) if first else None,
+        "first_tail": row_number(first)[-2:] if first else None,
+        "name": None,
+    }
+
+
+def _model_for(lottery: str, modality: str, rows: list[dict]) -> dict:
+    stored = load_model(lottery, modality)
+    if stored:
+        return {"model_name": stored["model_name"], "weights": stored["weights_json"], "score": stored["score"], "cases": stored["cases"]}
+    cal = calibrate(rows, modality, max_cases=60)
+    save_model(lottery, modality, cal["model_name"], cal["weights"], cal["score"], cal["cases"])
+    return {"model_name": cal["model_name"], "weights": cal["weights"], "score": cal["score"], "cases": cal["cases"], "metrics": cal.get("metrics", {}), "alternatives": cal.get("alternatives", [])}
+
+
+def _mode_description(mode: str, lottery: str, target_date: date, draw_time: str | None, rows: list[dict], model: dict, prev: dict | None, special: dict | None) -> str:
+    if mode == "dia":
+        return f"Sorte do Dia congelada para {target_date.strftime('%d/%m/%Y')}; histórico cortado exatamente às 00:00. {len(rows)} registros históricos usados."
+    parts = [f"Por Sorteio {draw_time}; dados limitados ao que existia antes de {draw_time}."]
+    if prev:
+        parts.append(f"Último sorteio usado: {prev['date']} {prev['time']}.")
+        m = _moment_from_draw(prev)
+        if m.get("first_group"):
+            parts.append(f"Bicho do momento: grupo {m['first_group']}.")
+    if special:
+        parts.append("Sinal especial do LOOK 23:20 anterior aplicado ao Nacional 02:00.")
+    parts.append(f"Modelo atual: {model['model_name']}.")
+    return " ".join(parts)
 
 
 def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch_aggregated: Callable):
@@ -36,247 +137,335 @@ def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch
         if lottery == "PT-RIO":
             rows = await fetch_rio(day)
             for row in rows:
-                row["draw_time"] = canonical_oracle_draw_time("PT-RIO", row.get("draw_time", ""), row.get("draw_code"))
+                row["draw_time"] = _canonical("PT-RIO", row.get("draw_time", ""))
             return upsert_results(rows), "PT-RIO"
         if lottery in {"Para Todos-SP", "LNS Nacional"}:
             rows = await fetch_aggregated(day, lottery)
             return upsert_results(rows), lottery
         raise HTTPException(400, f"Loteria não suportada: {lottery}")
 
-    async def sync_today_all() -> tuple[int, list[str]]:
-        today = datetime.now(BRAZIL_TZ).date()
-        total = 0
-        errors: list[str] = []
-        for lot in ORACLE_LOTTERIES:
+    async def sync_day(day: date, lotteries: Optional[list[str]] = None) -> tuple[int, list[str]]:
+        total = 0; errors=[]
+        for lot in lotteries or ORACLE_LOTTERIES:
             try:
-                n, _ = await sync_one(lot, today)
-                total += n
+                n,_ = await sync_one(lot, day); total += n
             except Exception as exc:
-                errors.append(f"{today.isoformat()} {lot}: {type(exc).__name__}: {exc}")
+                errors.append(f"{day.isoformat()} {lot}: {type(exc).__name__}: {exc}")
+        if lotteries is None:
+            log_sync(day.isoformat(), ORACLE_LOTTERIES, total, errors)
         return total, errors
 
-    async def learning_cycle(trigger: str = "manual") -> dict:
-        """Single safe cycle: sync -> evaluate missing -> learn/relearn -> persist audit."""
-        synced_rows, sync_errors = await sync_today_all()
+    async def sync_today_all():
+        return await sync_day(_now_local().date())
 
-        predictions = list_predictions(limit=500)
-        pending_seen = sum(1 for p in predictions if not bool(p.get("evaluated")))
-        evaluated_new = 0
-        relearned_existing = 0
-        learned = []
-        errors = list(sync_errors)
-        learn_targets: dict[tuple[str, str], list[dict]] = {}
+    async def _ensure_special_nacional_0200(target_date: date) -> dict | None:
+        if target_date != _now_local().date() and target_date > date.today():
+            return None
+        previous_day = target_date - timedelta(days=1)
+        try:
+            rows = get_results("LOOK Goiás", limit=5000)
+            look_rows = [r for r in rows if r["draw_date"] == previous_day.isoformat() and _canonical("LOOK Goiás", r["draw_time"]) == "23:20"]
+            if not look_rows:
+                try:
+                    await sync_one("LOOK Goiás", previous_day)
+                except Exception:
+                    pass
+                rows = get_results("LOOK Goiás", limit=5000)
+                look_rows = [r for r in rows if r["draw_date"] == previous_day.isoformat() and _canonical("LOOK Goiás", r["draw_time"]) == "23:20"]
+            if not look_rows:
+                return None
+            first = sorted(look_rows, key=lambda r:int(r.get("prize") or 999))[0]
+            n=row_number(first); g=int(first.get("group") or first.get("group_code") or group_of(n))
+            return {"first_number": n, "first_group": g, "first_tail": n[-2:], "source": "LOOK_23:20_previous_day"}
+        except Exception:
+            return None
 
-        for p in predictions:
-            target_time = canonical_oracle_draw_time(p["lottery"], p["draw_time"])
-            rows = get_results(p["lottery"], limit=3000)
-            actual = [
-                r for r in rows
-                if r["draw_date"] == p["draw_date"]
-                and canonical_oracle_draw_time(p["lottery"], r["draw_time"], r.get("draw_code")) == target_time
-            ]
-            if not actual:
-                continue
+    def _build_prediction(lottery: str, mode: str, target_date: date, draw_time: str | None, modality: str,
+                          rows: list[dict], prev_draw: dict | None, special: dict | None, context_seed: str) -> dict:
+        model = _model_for(lottery, modality, rows)
+        portfolio = generate_portfolio(rows, lottery, mode, target_date, draw_time, model["model_name"], model["weights"], special_signal=special, context_seed=context_seed)
+        p = portfolio["portfolio"][modality]
+        if isinstance(p, list):
+            prediction = ", ".join(p)
+            candidates = p[:] if len(p) <= 30 else portfolio["rankings"].get("dezena",[])[:50]
+        else:
+            prediction = str(p)
+            if modality == "milhar": candidates=portfolio["rankings"]["milhar"]
+            elif modality == "centena": candidates=portfolio["rankings"]["centena"]
+            elif modality == "grupo": candidates=portfolio["rankings"]["grupo"]
+            else: candidates=portfolio["rankings"]["dezena"]
+        return portfolio, prediction, candidates, model
 
-            try:
-                ev = None
-                is_new_evaluation = not bool(p.get("evaluated")) or not p.get("evaluation_json")
-                if is_new_evaluation:
-                    candidates = p.get("candidates_json") or []
-                    ev = evaluate_prediction(p["prediction"], actual, p["modality"], candidates)
-                    ev["score"] = round(
-                        float(bool(ev.get("exact")))
-                        + 0.3 * float(bool(ev.get("tail")))
-                        + 0.2 * float(bool(ev.get("group"))), 4
-                    )
-                    ev["target"] = f"{p['draw_date']}T{target_time}:00"
-                    ev["prediction_id"] = p["id"]
-                    ev["prediction"] = p["prediction"]
-                    ev["actual_prizes"] = [str(r["number"]).zfill(4) for r in actual[:10]]
-                    mark_prediction_evaluated(int(p["id"]), ev)
-                    evaluated_new += 1
-                else:
-                    # A previous deployment may already have written evaluation_json
-                    # without completing the learning event. Reuse the immutable
-                    # evaluation instead of silently skipping the learning step.
-                    ev = p["evaluation_json"]
+    async def ensure_forecast(lottery: str, mode: str, target_date: date, draw_time: str | None,
+                              modality: str, force_retrain: bool=False) -> dict:
+        mode = mode.lower()
+        if modality not in ORACLE_MODALITIES:
+            raise HTTPException(400, f"Modalidade não suportada: {modality}")
+        modality = MODALITY_ALIASES.get(modality, modality)
+        if mode not in {"dia", "sorteio"}:
+            raise HTTPException(400, "Modo deve ser dia ou sorteio")
+        canonical_time = "00:00" if mode == "dia" else _canonical(lottery, draw_time or "")
+        existing = get_prediction(lottery, target_date.isoformat(), canonical_time, modality)
+        if existing:
+            return {"status":"frozen", "prediction": existing["prediction"], "record": existing}
 
-                # A forecast is learned exactly once after its result is available.
-                if ev is not None and not prediction_has_event(int(p["id"]), "learned"):
-                    learn_targets.setdefault((p["lottery"], p["modality"]), []).append({
-                        "prediction_id": int(p["id"]),
-                        "evaluation": ev,
-                    })
-                    if not is_new_evaluation:
-                        relearned_existing += 1
-            except Exception as exc:
-                errors.append(f"evaluate/prepare #{p.get('id')}: {type(exc).__name__}: {exc}")
-
-        # Recalibrate every modality that has at least one newly learnable case.
-        # The current result is now part of history because it arrived before this
-        # recalibration step; it can therefore legitimately influence future draws.
-        for (lot, modality), targets in sorted(learn_targets.items()):
-            try:
-                rows = get_results(lot, limit=3000)
-                if len(rows) < 25:
-                    raise ValueError(f"Histórico insuficiente para recalibração: {len(rows)} registros")
-                result = calibrate(rows, modality, max_cases=40)
-                save_model(lot, modality, result.model_name, result.weights, result.score, result.cases)
-                for target in targets:
-                    add_prediction_event(int(target["prediction_id"]), "learned", {
-                        "lottery": lot, "modality": modality,
-                        "model": result.model_name, "score": result.score,
-                        "cases": result.cases, "metrics": result.metrics,
-                        "reason": "post-result walk-forward recalibration",
-                    })
-                learned.append({
-                    "lottery": lot, "modality": modality, "model": result.model_name,
-                    "score": result.score, "cases": result.cases, "metrics": result.metrics,
-                    "predictions_learned": [t["prediction_id"] for t in targets],
-                })
-            except Exception as exc:
-                errors.append(f"calibration {lot}/{modality}: {type(exc).__name__}: {exc}")
-
-        log_learning_run(trigger, synced_rows, evaluated_new, pending_seen, errors)
-        counts = prediction_counts()
-        return {
-            "status": "ok", "trigger": trigger, "synced_rows": synced_rows,
-            "evaluated": evaluated_new, "relearned_existing": relearned_existing,
-            "pending_seen": pending_seen, "predictions": counts,
-            "learned": learned, "errors": errors,
+        now = _now_local()
+        if mode == "sorteio":
+            if _target_exists(lottery, target_date.isoformat(), canonical_time):
+                raise HTTPException(409, "O sorteio alvo já possui resultado armazenado; não é permitida previsão retroativa.")
+            if target_date == now.date() and now.time() >= dtime.fromisoformat(canonical_time):
+                # A previsão pode existir only if it had been frozen before the draw.
+                raise HTTPException(409, "O horário alvo já passou e ainda não existe previsão congelada para ele.")
+            prev = _previous_draw_requirement(lottery, target_date, canonical_time)
+            if prev is None:
+                raise HTTPException(409, f"A previsão de {canonical_time} aguarda o resultado do sorteio imediatamente anterior.")
+            cutoff=_cutoff_iso(target_date.isoformat(), canonical_time)
+            rows=get_results(lottery, cutoff_iso=cutoff, limit=5000)
+            special=None
+            if lottery == "LNS Nacional" and canonical_time == "02:00":
+                special = await _ensure_special_nacional_0200(target_date)
+        else:
+            prev=None; special=None
+            cutoff=_daily_cutoff(target_date)
+            rows=get_results(lottery, cutoff_iso=cutoff, limit=5000)
+        if len(rows) < 20:
+            raise HTTPException(409, f"Histórico insuficiente antes do corte: {len(rows)} registros.")
+        if force_retrain:
+            cal=calibrate(rows, modality, max_cases=60)
+            save_model(lottery, modality, cal["model_name"], cal["weights"], cal["score"], cal["cases"])
+        portfolio, prediction, candidates, model=_build_prediction(lottery,mode,target_date,canonical_time,modality,rows,prev,special,f"{mode}|{target_date}|{canonical_time}")
+        context={
+            "mode":mode, "history_rows":len(rows), "previous_draw":prev, "special_signal":special,
+            "calendar_group":portfolio["features"].get("calendar_group"), "moment_groups":portfolio["features"].get("moment_groups"),
+            "portfolio":portfolio["portfolio"], "rankings":portfolio["rankings"],
         }
+        pid=save_prediction({"lottery":lottery,"draw_date":target_date.isoformat(),"draw_time":canonical_time,
+                             "modality":modality,"prediction":prediction,"candidates":candidates,"cutoff_iso":cutoff,
+                             "model_name":model["model_name"],"model":model["weights"],"context":context})
+        rec=get_prediction(lottery,target_date.isoformat(),canonical_time,modality)
+        return {
+            "status":"calculated", "prediction_id":pid, "prediction":prediction, "candidates":candidates,
+            "portfolio":portfolio["portfolio"], "rankings":portfolio["rankings"], "cutoff_iso":cutoff,
+            "history_rows":len(rows), "model":model, "message":_mode_description(mode,lottery,target_date,canonical_time,rows,model,prev,special),
+            "record":rec,
+        }
+
+    async def ensure_super(super_type: str, target_date: date) -> dict:
+        modality = "super_milhar" if super_type == "milhar" else "super_centena"
+        existing=get_prediction("SUPER",target_date.isoformat(),"00:00",modality)
+        if existing:
+            vals=existing["prediction"].split(",") if existing["prediction"] else []
+            return {"status":"frozen","type":super_type,"items":vals,"record":existing}
+        cutoff=_daily_cutoff(target_date)
+        all_rows=[]
+        for lot in ORACLE_LOTTERIES:
+            all_rows.extend(get_results(lot,cutoff_iso=cutoff,limit=5000))
+        if len(all_rows)<60:
+            raise HTTPException(409,f"Histórico agregado insuficiente antes do corte: {len(all_rows)} registros.")
+        # Calibrate against a synthetic SUPER corpus using the same temporal engine.
+        cal=calibrate(all_rows,"milhar" if super_type=="milhar" else "centena",max_cases=60)
+        from oracle_brain import build_features, rank_numbers, _pick_unique
+        f=build_features(all_rows,reference_date=target_date)
+        ranked=rank_numbers(f,"milhar" if super_type=="milhar" else "centena",cal["weights"],400)
+        amount=100 if super_type=="milhar" else 50
+        items=_pick_unique(ranked,amount,f"SUPER|{target_date.isoformat()}|{super_type}")
+        save_prediction({"lottery":"SUPER","draw_date":target_date.isoformat(),"draw_time":"00:00","modality":modality,
+                         "prediction":", ".join(items),"candidates":ranked[:100],"cutoff_iso":cutoff,"model_name":cal["model_name"],
+                         "model":cal["weights"],"context":{"mode":"super","type":super_type,"history_rows":len(all_rows),"lotteries":ORACLE_LOTTERIES}})
+        return {"status":"calculated","type":super_type,"items":items,"model":cal,"cutoff_iso":cutoff,"history_rows":len(all_rows)}
+
+    async def _evaluate_one(p: dict) -> tuple[bool,bool,dict|None]:
+        lottery=p["lottery"]; modality=p["modality"]; draw_date=p["draw_date"]; draw_time=p["draw_time"]
+        ctx=p.get("context_json") or {}
+        mode=ctx.get("mode") or ("dia" if draw_time=="00:00" else "sorteio")
+        if lottery == "SUPER":
+            if mode != "super": return False,False,None
+            target=date.fromisoformat(draw_date); now=_now_local()
+            last_done=max(x[-1] for x in ORACLE_SCHEDULES.values())
+            if target == now.date() and now.time() <= dtime.fromisoformat(last_done): return False,False,None
+            actual=[]
+            for lot in ORACLE_LOTTERIES:
+                actual.extend([r for r in get_results(lot,limit=5000) if r["draw_date"]==draw_date])
+            if not actual: return False,False,None
+            ev=evaluate_forecast(p["prediction"],actual, "milhar" if modality.endswith("milhar") else "centena", p.get("candidates") or [])
+        elif mode=="dia":
+            target=date.fromisoformat(draw_date); now=_now_local()
+            if target == now.date() and now.time() <= dtime.fromisoformat(ORACLE_SCHEDULES[lottery][-1]): return False,False,None
+            actual=[r for r in get_results(lottery,limit=5000) if r["draw_date"]==draw_date]
+            if not actual: return False,False,None
+            ev=evaluate_forecast(p["prediction"],actual,modality,p.get("candidates") or [])
+        else:
+            actual=_draw_rows(lottery,draw_date,draw_time)
+            if not actual: return False,False,None
+            ev=evaluate_forecast(p["prediction"],actual,modality,p.get("candidates") or [])
+        is_new=not bool(p.get("evaluated")) or not p.get("evaluation_json")
+        if is_new:
+            ev["target"]=f"{draw_date}T{draw_time}:00"; ev["prediction_id"]=p["id"]; ev["prediction"]=p["prediction"]
+            mark_prediction_evaluated(int(p["id"]),ev)
+        else:
+            ev=p["evaluation_json"]
+        return True,is_new,ev
+
+    async def learning_cycle(trigger: str="cycle") -> dict:
+        synced, sync_errors = await sync_today_all()
+        predictions=list_predictions(limit=1000)
+        pending_before=sum(1 for p in predictions if not p.get("evaluated"))
+        evaluated=0; relearned=0; learned=[]; errors=list(sync_errors)
+        targets={}
+        for p in predictions:
+            try:
+                found,is_new,ev=await _evaluate_one(p)
+                if not found or ev is None: continue
+                if is_new: evaluated+=1
+                if prediction_has_event(int(p["id"]),"learned"): continue
+                key=(p["lottery"],p["modality"])
+                if p["lottery"]=="SUPER":
+                    add_prediction_event(int(p["id"]),"learned",{"model":"aggregate","score":ev.get("score",0),"reason":"daily evaluation"})
+                    learned.append({"lottery":"SUPER","modality":p["modality"],"model":"aggregate","score":ev.get("score",0),"cases":1,"predictions_learned":[p["id"]]})
+                    continue
+                targets.setdefault(key,[]).append(p)
+                if not is_new: relearned+=1
+            except Exception as exc:
+                errors.append(f"evaluate #{p.get('id')}: {type(exc).__name__}: {exc}")
+        for (lot,mod), plist in sorted(targets.items()):
+            try:
+                rows=get_results(lot,limit=5000)
+                if len(rows)<25: continue
+                cal=calibrate(rows,mod,max_cases=60)
+                save_model(lot,mod,cal["model_name"],cal["weights"],cal["score"],cal["cases"])
+                for p in plist:
+                    add_prediction_event(int(p["id"]),"learned",{"lottery":lot,"modality":mod,"model":cal["model_name"],"score":cal["score"],"cases":cal["cases"],"metrics":cal.get("metrics",{})})
+                learned.append({"lottery":lot,"modality":mod,"model":cal["model_name"],"score":cal["score"],"cases":cal["cases"],"metrics":cal.get("metrics",{}),"predictions_learned":[p["id"] for p in plist]})
+            except Exception as exc:
+                errors.append(f"calibration {lot}/{mod}: {type(exc).__name__}: {exc}")
+        log_learning_run(trigger,synced,evaluated,pending_before,errors)
+        return {"status":"ok","trigger":trigger,"synced_rows":synced,"evaluated":evaluated,"relearned_existing":relearned,"pending_seen":pending_before,"predictions":prediction_counts(),"learned":learned,"errors":errors}
+
+    async def prewarm_current_day() -> dict:
+        today=_now_local().date(); now=_now_local(); generated=[]; skipped=[]; errors=[]
+        # Daily portfolios for all core lotteries.
+        for lot in ORACLE_LOTTERIES:
+            for mod in ORACLE_MODALITIES:
+                try:
+                    await ensure_forecast(lot,"dia",today,None,mod)
+                    generated.append({"mode":"dia","lottery":lot,"modality":mod})
+                except HTTPException as exc:
+                    skipped.append({"mode":"dia","lottery":lot,"modality":mod,"reason":str(exc.detail)})
+                except Exception as exc:
+                    errors.append(f"dia {lot}/{mod}: {type(exc).__name__}: {exc}")
+        # Next eligible draw for each lottery. Later draws require the immediately
+        # preceding draw to be present; first draws may use yesterday's last draw.
+        for lot,times in ORACLE_SCHEDULES.items():
+            next_time=None
+            for t in times:
+                if now.time() < dtime.fromisoformat(t):
+                    next_time=t; break
+            if not next_time: continue
+            for mod in ORACLE_MODALITIES:
+                try:
+                    await ensure_forecast(lot,"sorteio",today,next_time,mod)
+                    generated.append({"mode":"sorteio","lottery":lot,"time":next_time,"modality":mod})
+                except HTTPException as exc:
+                    skipped.append({"mode":"sorteio","lottery":lot,"time":next_time,"modality":mod,"reason":str(exc.detail)})
+                except Exception as exc:
+                    errors.append(f"sorteio {lot}/{next_time}/{mod}: {type(exc).__name__}: {exc}")
+        for st in ("milhar","centena"):
+            try: await ensure_super(st,today); generated.append({"mode":"super","type":st})
+            except Exception as exc: errors.append(f"super {st}: {type(exc).__name__}: {exc}")
+        return {"generated":generated[-80:],"skipped":skipped[-80:],"errors":errors[-50:]}
 
     @router.get("/status")
     def status():
-        return {
-            "ok": True,
-            "database": database_info(),
-            "lotteries": ORACLE_LOTTERIES,
-            "modalities": ORACLE_MODALITIES,
-            "predictions": prediction_counts(),
-            "results": result_counts(),
-            "message": "Motor histórico e calibração disponíveis.",
-        }
+        return {"ok":True,"database":database_info(),"lotteries":ORACLE_LOTTERIES,"schedules":ORACLE_SCHEDULES,"modalities":ORACLE_MODALITIES,"predictions":prediction_counts(),"results":result_counts(),"message":"Oráculo persistente, congelado e preparado para ciclo automático."}
 
     @router.get("/diagnose")
-    def diagnose(limit: int = Query(10, ge=1, le=50)):
-        recent = list_predictions(limit=limit)
-        compact = []
-        for p in recent:
-            compact.append({
-                "id": p["id"], "lottery": p["lottery"], "draw_date": p["draw_date"],
-                "draw_time": p["draw_time"], "modality": p["modality"],
-                "prediction": p["prediction"], "evaluated": bool(p.get("evaluated")),
-                "created_at": str(p.get("created_at")),
-                "has_evaluation": bool(p.get("evaluation_json")),
-            })
-        return {
-            "status": "ok", "database": database_info(), "predictions": prediction_counts(),
-            "results": result_counts(), "recent_predictions": compact,
-        }
+    def diagnose(limit:int=Query(10,ge=1,le=100)):
+        recent=list_predictions(limit=limit)
+        return {"status":"ok","database":database_info(),"predictions":prediction_counts(),"results":result_counts(),"recent_predictions":[{
+            "id":p["id"],"lottery":p["lottery"],"draw_date":p["draw_date"],"draw_time":p["draw_time"],"modality":p["modality"],"prediction":p["prediction"],"evaluated":bool(p.get("evaluated")),"created_at":str(p.get("created_at"))
+        } for p in recent]}
 
     @router.get("/sync")
-    async def sync(draw_date: Optional[date] = Query(default=None), lottery: Optional[str] = Query(default=None)):
-        day = draw_date or datetime.now(BRAZIL_TZ).date()
-        lots = [lottery] if lottery else list(ORACLE_LOTTERIES)
-        inserted = 0; errors: list[str] = []
-        for lot in lots:
-            try:
-                n, _ = await sync_one(lot, day); inserted += n
-            except Exception as exc:
-                errors.append(f"{lot}: {type(exc).__name__}: {exc}")
-        log_sync(day.isoformat(), lots, inserted, errors)
-        return {"status": "ok", "date": day.isoformat(), "lotteries": lots, "inserted": inserted, "errors": errors}
+    async def sync(draw_date: Optional[date]=Query(None), lottery: Optional[str]=Query(None)):
+        day=draw_date or _now_local().date(); lots=[lottery] if lottery else ORACLE_LOTTERIES
+        inserted,errors=await sync_day(day,lots); log_sync(day.isoformat(),lots,inserted,errors)
+        return {"status":"ok","date":day.isoformat(),"lotteries":lots,"inserted":inserted,"errors":errors}
 
     @router.get("/backfill")
-    async def backfill(days: int = Query(default=7, ge=1, le=90), lottery: Optional[str] = Query(default=None)):
-        today = datetime.now(BRAZIL_TZ).date()
-        lots = [lottery] if lottery else list(ORACLE_LOTTERIES)
-        summary = {lot: {"days": 0, "inserted": 0, "errors": 0} for lot in lots}
-        all_errors = []
-        for offset in range(days - 1, -1, -1):
-            day = today - timedelta(days=offset)
+    async def backfill(days:int=Query(14,ge=1,le=90), lottery:Optional[str]=Query(None)):
+        today=_now_local().date(); lots=[lottery] if lottery else ORACLE_LOTTERIES
+        summary={lot:{"days":0,"inserted":0,"errors":0} for lot in lots}; errors=[]
+        for offset in range(days-1,-1,-1):
+            day=today-timedelta(days=offset)
             for lot in lots:
                 try:
-                    n, _ = await sync_one(lot, day)
-                    summary[lot]["days"] += 1; summary[lot]["inserted"] += n
+                    n,_=await sync_one(lot,day)
+                    summary[lot]["days"]+=1
+                    summary[lot]["inserted"]+=n
                 except Exception as exc:
-                    summary[lot]["errors"] += 1
-                    all_errors.append(f"{day.isoformat()} {lot}: {type(exc).__name__}: {exc}")
-        return {"status": "ok", "days": days, "summary": summary, "errors": all_errors[-50:]}
+                    summary[lot]["errors"]+=1
+                    msg=f"{day.isoformat()} {lot}: {type(exc).__name__}: {exc}"
+                    errors.append(msg)
+        return {"status":"ok","days":days,"summary":summary,"errors":errors[-50:]}
 
     @router.get("/calibrate")
-    def calibrate_route(lottery: str = Query(...), modality: str = Query("milhar"), max_cases: int = Query(40, ge=10, le=100)):
-        if lottery not in ORACLE_LOTTERIES: raise HTTPException(400, "Loteria não suportada")
-        if modality not in ORACLE_MODALITIES: raise HTTPException(400, "Modalidade não suportada")
-        rows = get_results(lottery, limit=3000)
-        if len(rows) < 25: raise HTTPException(409, f"Histórico insuficiente: {len(rows)} registros. Faça um backfill primeiro.")
-        result = calibrate(rows, modality, max_cases=max_cases)
-        save_model(lottery, modality, result.model_name, result.weights, result.score, result.cases)
-        return {
-            "status": "ok", "lottery": lottery, "modality": modality, "model": result.model_name,
-            "weights": result.weights, "score": result.score, "cases": result.cases, "metrics": result.metrics,
-            "warning": "A calibração mede aderência histórica; não garante acertos futuros.",
-        }
+    def calibrate_route(lottery:str=Query(...),modality:str=Query("milhar"),max_cases:int=Query(60,ge=10,le=120)):
+        modality=MODALITY_ALIASES.get(modality,modality)
+        if lottery not in ORACLE_LOTTERIES or modality not in ORACLE_MODALITIES: raise HTTPException(400,"Loteria ou modalidade não suportada")
+        rows=get_results(lottery,limit=5000)
+        if len(rows)<25: raise HTTPException(409,f"Histórico insuficiente: {len(rows)} registros.")
+        cal=calibrate(rows,modality,max_cases=max_cases); save_model(lottery,modality,cal["model_name"],cal["weights"],cal["score"],cal["cases"])
+        return {"status":"ok","lottery":lottery,"modality":modality,**cal,"warning":"A calibração mede aderência histórica; não garante acertos futuros."}
+
+    @router.get("/portfolio")
+    async def portfolio(lottery:str=Query(...),mode:str=Query("dia"),draw_date:str=Query(...),draw_time:Optional[str]=Query(None),modality:str=Query("milhar"),force_retrain:bool=Query(False)):
+        if lottery not in ORACLE_LOTTERIES: raise HTTPException(400,"Loteria não suportada")
+        if modality not in ORACLE_MODALITIES: raise HTTPException(400,"Modalidade não suportada")
+        target=date.fromisoformat(draw_date)
+        return await ensure_forecast(lottery,mode,target,draw_time,modality,force_retrain)
+
+    @router.get("/results")
+    async def stored_results(lottery: str = Query(...), draw_date: Optional[str] = Query(None), sync: bool = Query(True)):
+        if lottery not in ORACLE_LOTTERIES:
+            raise HTTPException(400, "Loteria não suportada")
+        day = date.fromisoformat(draw_date) if draw_date else _now_local().date()
+        sync_error = None
+        if sync:
+            try:
+                await sync_one(lottery, day)
+            except Exception as exc:
+                sync_error = f"{type(exc).__name__}: {exc}"
+        rows = get_results(lottery, limit=5000)
+        rows = [r for r in rows if r["draw_date"] == day.isoformat()]
+        rows.sort(key=lambda r: (r["draw_time"], int(r.get("prize") or 999)))
+        return {"status":"ok","lottery":lottery,"date":day.isoformat(),"count":len(rows),"results":rows,"sync_error":sync_error}
+
+    @router.get("/super")
+    async def super_endpoint(type:str=Query("milhar"),draw_date:str=Query(...)):
+        if type not in {"milhar","centena"}: raise HTTPException(400,"type deve ser milhar ou centena")
+        return await ensure_super(type,date.fromisoformat(draw_date))
 
     @router.get("/predict")
-    def predict_route(
-        lottery: str = Query(...), draw_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
-        draw_time: str = Query(..., pattern=r"^\d{2}:\d{2}$"), modality: str = Query("milhar"),
-        force_retrain: bool = Query(False),
-    ):
-        if lottery not in ORACLE_LOTTERIES: raise HTTPException(400, "Loteria não suportada")
-        if modality not in ORACLE_MODALITIES: raise HTTPException(400, "Modalidade não suportada")
-        draw_time = canonical_oracle_draw_time(lottery, draw_time)
-
-        # Immutable frozen record wins over any later request, including force_retrain.
-        frozen = get_prediction(lottery, draw_date, draw_time, modality)
-        if frozen:
-            return {"status": "frozen", "prediction": frozen["prediction"], "record": frozen}
-
-        cutoff = _target_cutoff(draw_date, draw_time)
-        target_rows = get_results(lottery, limit=3000)
-        target_exists = any(
-            r["draw_date"] == draw_date
-            and canonical_oracle_draw_time(lottery, r["draw_time"], r.get("draw_code")) == draw_time
-            for r in target_rows
-        )
-        if target_exists:
-            raise HTTPException(409, "O sorteio alvo já possui resultado armazenado e não tinha previsão congelada. Não é permitida previsão retroativa.")
-
-        rows = get_results(lottery, cutoff_iso=cutoff, limit=3000)
-        if len(rows) < 20:
-            raise HTTPException(409, f"Histórico insuficiente antes do corte: {len(rows)} registros.")
-        model = load_model(lottery, modality)
-        if not model or force_retrain:
-            cal = calibrate(rows, modality, max_cases=40)
-            model_name, weights, score, cases = cal.model_name, cal.weights, cal.score, cal.cases
-            save_model(lottery, modality, model_name, weights, score, cases)
-        else:
-            model_name, weights = model["model_name"], model["weights_json"]
-        pack = predict(rows, modality, model_name, limit=50, target_date=date.fromisoformat(draw_date))
-        payload = {
-            "lottery": lottery, "draw_date": draw_date, "draw_time": draw_time, "modality": modality,
-            "prediction": pack["prediction"], "candidates": pack["candidates"], "cutoff_iso": cutoff,
-            "model_name": model_name, "model": weights,
-            "context": {"history_rows": len(rows), "latest_draw": pack["latest_draw"], "calendar_group": pack["calendar_group"], "moment_groups": pack["moment_groups"]},
-        }
-        prediction_id = save_prediction(payload)
-        frozen = get_prediction(lottery, draw_date, draw_time, modality)
-        return {"status": "calculated", "prediction_id": prediction_id, **pack, "cutoff_iso": cutoff, "frozen_created_at": str(frozen.get("created_at")) if frozen else None}
+    async def predict_compat(lottery:str=Query(...),draw_date:str=Query(...),draw_time:str=Query(...),modality:str=Query("milhar")):
+        return await ensure_forecast(lottery,"sorteio",date.fromisoformat(draw_date),draw_time,modality)
 
     @router.get("/evaluate-pending")
-    async def evaluate_pending(lottery: Optional[str] = None):
-        # Backwards-compatible endpoint name; the new learning loop is broader and safer.
-        result = await learning_cycle("evaluate-pending")
-        if lottery:
-            # Keep response shape useful for existing callers; actual filtering is done by the full loop.
-            result["lottery_filter"] = lottery
-        return result
+    async def evaluate_pending():
+        return await learning_cycle("evaluate-pending")
 
     @router.get("/learn-now")
     async def learn_now():
         return await learning_cycle("learn-now")
+
+    @router.get("/cycle")
+    async def cycle():
+        learning=await learning_cycle("cycle")
+        prewarm=await prewarm_current_day()
+        return {"status":"ok","learning":learning,"prewarm":prewarm}
+
+    @router.get("/prewarm")
+    async def prewarm():
+        return {"status":"ok",**(await prewarm_current_day())}
 
     app.include_router(router)
     return router

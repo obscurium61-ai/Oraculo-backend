@@ -9,11 +9,13 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "4.0.0-learning-stable"
+VERSION = "5.0.0-final-oraculo"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -1058,6 +1060,12 @@ def root():
         "supported_times": sorted(LOOK_TIMES),
         "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
     }
+
+
+@app.get("/app")
+def app_page():
+    path = Path(__file__).resolve().parent / "frontend" / "Mago_Oraculo_FINAL.html"
+    return FileResponse(path, media_type="text/html; charset=utf-8")
 
 
 @app.get("/health")
