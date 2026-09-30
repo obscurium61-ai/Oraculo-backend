@@ -1,36 +1,19 @@
-name: Oráculo Learning Cycle
+name: Oráculo - Ciclo Automático
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/10 * * * *"
 
 jobs:
-  learn:
+  oracle-cycle:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
-      - name: Sync today's results
-        run: |
-          curl --fail --retry 2 --max-time 90 \
-            "${ORACULO_API_URL}/api/oracle/sync" \
-            || exit 1
-      - name: Evaluate frozen predictions
-        run: |
-          curl --fail --retry 2 --max-time 60 \
-            "${ORACULO_API_URL}/api/oracle/evaluate-pending" \
-            || exit 1
-      - name: Recalibrate core models
+      - name: Sincronizar, avaliar, aprender e preparar previsões
+        env:
+          ORACULO_API_URL: https://oraculo-backend-mor3.onrender.com
         run: |
           set -e
-          for lottery in "PT-RIO" "Para Todos-SP" "LOOK Goiás" "LNS Nacional"; do
-            for modality in milhar centena dezena grupo; do
-              curl --fail --retry 1 --max-time 120 \
-                --get \
-                --data-urlencode "lottery=${lottery}" \
-                --data-urlencode "modality=${modality}" \
-                "${ORACULO_API_URL}/api/oracle/calibrate" \
-                || echo "Calibration skipped: ${lottery}/${modality}"
-            done
-          done
-    env:
-      ORACULO_API_URL: ${{ secrets.ORACULO_API_URL }}
+          curl --fail --retry 3 --retry-delay 5 --max-time 180 \
+            "${ORACULO_API_URL}/api/oracle/cycle"
