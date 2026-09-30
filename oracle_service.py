@@ -120,16 +120,15 @@ def _model_for(lottery: str, modality: str, rows: list[dict]) -> dict:
                 "score": float(stored.get("score") or 0.0),
                 "cases": int(stored.get("cases") or 0),
             }
-        # Legacy/incompatible model: overwrite with a valid V5 model immediately.
+        # Legacy/incompatible model: use a valid V5 baseline in memory.
+        # A migração permanente fica para o ciclo de aprendizado, evitando uma
+        # escrita no banco logo na primeira consulta do usuário.
         fallback = MODEL_FAMILIES["balanced"]
-        save_model(lottery, modality, "balanced", fallback, 0.0, 0)
         return {"model_name": "balanced", "weights": fallback, "score": 0.0, "cases": 0, "migrated_legacy": True}
 
-    # Cold start: use a valid V5 baseline immediately. Heavy walk-forward calibration
-    # is performed by /api/oracle/learn-now or /api/oracle/cycle, not on the user's
-    # first screen load. This avoids Render request timeouts while preserving learning.
+    # Cold start: use um baseline V5 em memória imediatamente. A calibração pesada
+    # é feita por /api/oracle/learn-now ou /api/oracle/cycle, não no primeiro acesso.
     fallback = MODEL_FAMILIES["balanced"]
-    save_model(lottery, modality, "balanced", fallback, 0.0, 0)
     return {"model_name": "balanced", "weights": fallback, "score": 0.0, "cases": 0, "cold_start": True}
 
 
@@ -150,7 +149,9 @@ def _mode_description(mode: str, lottery: str, target_date: date, draw_time: str
 
 def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch_aggregated: Callable):
     router = APIRouter(prefix="/api/oracle", tags=["oracle"])
-    ensure_schema()
+    # Não toque no banco durante a inicialização do processo. O Render deve
+    # conseguir subir e responder /health mesmo quando o Postgres estiver
+    # temporariamente indisponível; o schema será preparado sob demanda.
 
     def _dedupe_rows(rows: list[dict]) -> list[dict]:
         # Fontes históricas às vezes repetem uma mesma linha (especialmente o 7º/8º prêmio).

@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "5.0.0-final-oraculo"
+VERSION = "5.0.1-render-stable"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -1069,7 +1069,9 @@ def app_page():
 
 
 @app.get("/health")
-def health():
+async def health():
+    # Endpoint sem banco/nenhuma chamada externa: deve continuar respondendo
+    # mesmo se o Postgres remoto estiver indisponível.
     return {"ok": True, "service": APP_NAME, "version": VERSION}
 
 

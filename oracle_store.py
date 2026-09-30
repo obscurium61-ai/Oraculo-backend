@@ -33,12 +33,30 @@ if DB_URL.startswith("sqlite:///"):
     if db_path and db_path not in {":memory:", "./oraculo_local.sqlite3"}:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-engine: Engine = create_engine(
-    DB_URL,
-    future=True,
-    pool_pre_ping=True,
-    connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {},
-)
+if DB_URL.startswith("sqlite"):
+    engine: Engine = create_engine(
+        DB_URL,
+        future=True,
+        pool_pre_ping=True,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    # O banco remoto nunca deve conseguir travar o servidor do Render
+    # indefinidamente. Limites curtos evitam que conexões presas ocupem
+    # todos os workers enquanto o /health continua disponível.
+    engine = create_engine(
+        DB_URL,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=3,
+        max_overflow=0,
+        pool_timeout=5,
+        pool_recycle=300,
+        connect_args={
+            "connect_timeout": 5,
+            "options": "-c statement_timeout=8000",
+        },
+    )
 
 metadata = MetaData()
 
@@ -168,12 +186,20 @@ def normalize_existing_pt_rio_times() -> int:
     return changed
 
 
+_SCHEMA_READY = False
+
 def ensure_schema() -> None:
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
     metadata.create_all(engine)
     try:
         normalize_existing_pt_rio_times()
     except Exception:
+        # A normalização é apenas de manutenção; uma falha não deve impedir
+        # o uso das tabelas já existentes.
         pass
+    _SCHEMA_READY = True
 
 
 def database_info() -> dict:
