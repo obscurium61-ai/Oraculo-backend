@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "2.0.0-learning"
+VERSION = "4.0.0-learning-stable"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
