@@ -12,6 +12,7 @@ from oracle_store import (
     ensure_schema, database_info, upsert_results, get_results, get_prediction,
     save_prediction, save_model, load_model, pending_predictions,
     list_predictions, prediction_counts, result_counts, mark_prediction_evaluated,
+    prediction_has_event, add_prediction_event,
     log_sync, log_learning_run, canonical_oracle_draw_time,
 )
 
@@ -55,18 +56,16 @@ def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch
         return total, errors
 
     async def learning_cycle(trigger: str = "manual") -> dict:
-        # 1) Always sync today first. Do not depend on the pending flag to decide
-        # whether a just-published result should enter the database.
+        """Single safe cycle: sync -> evaluate missing -> learn/relearn -> persist audit."""
         synced_rows, sync_errors = await sync_today_all()
 
-        # 2) Look at ALL recent predictions, not only pending=True. This makes the
-        # loop resilient to legacy/inconsistent evaluation flags after a deploy.
         predictions = list_predictions(limit=500)
         pending_seen = sum(1 for p in predictions if not bool(p.get("evaluated")))
-        evaluated = 0
+        evaluated_new = 0
+        relearned_existing = 0
         learned = []
         errors = list(sync_errors)
-        touched = set()
+        learn_targets: dict[tuple[str, str], list[dict]] = {}
 
         for p in predictions:
             target_time = canonical_oracle_draw_time(p["lottery"], p["draw_time"])
@@ -79,48 +78,72 @@ def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch
             if not actual:
                 continue
 
-            # Do not re-score a completed evaluation unless its JSON is missing.
-            if p.get("evaluated") and p.get("evaluation_json"):
-                continue
-
             try:
-                candidates = p.get("candidates_json") or []
-                ev = evaluate_prediction(p["prediction"], actual, p["modality"], candidates)
-                ev["score"] = round(
-                    float(bool(ev.get("exact")))
-                    + 0.3 * float(bool(ev.get("tail")))
-                    + 0.2 * float(bool(ev.get("group"))), 4
-                )
-                ev["target"] = f"{p['draw_date']}T{target_time}:00"
-                ev["prediction_id"] = p["id"]
-                ev["prediction"] = p["prediction"]
-                ev["actual_prizes"] = [str(r["number"]).zfill(4) for r in actual[:10]]
-                mark_prediction_evaluated(int(p["id"]), ev)
-                evaluated += 1
-                touched.add((p["lottery"], p["modality"]))
-            except Exception as exc:
-                errors.append(f"evaluate #{p.get('id')}: {type(exc).__name__}: {exc}")
+                ev = None
+                is_new_evaluation = not bool(p.get("evaluated")) or not p.get("evaluation_json")
+                if is_new_evaluation:
+                    candidates = p.get("candidates_json") or []
+                    ev = evaluate_prediction(p["prediction"], actual, p["modality"], candidates)
+                    ev["score"] = round(
+                        float(bool(ev.get("exact")))
+                        + 0.3 * float(bool(ev.get("tail")))
+                        + 0.2 * float(bool(ev.get("group"))), 4
+                    )
+                    ev["target"] = f"{p['draw_date']}T{target_time}:00"
+                    ev["prediction_id"] = p["id"]
+                    ev["prediction"] = p["prediction"]
+                    ev["actual_prizes"] = [str(r["number"]).zfill(4) for r in actual[:10]]
+                    mark_prediction_evaluated(int(p["id"]), ev)
+                    evaluated_new += 1
+                else:
+                    # A previous deployment may already have written evaluation_json
+                    # without completing the learning event. Reuse the immutable
+                    # evaluation instead of silently skipping the learning step.
+                    ev = p["evaluation_json"]
 
-        # 3) Recalibrate only modalities that actually received a new evaluation.
-        for lot, modality in sorted(touched):
+                # A forecast is learned exactly once after its result is available.
+                if ev is not None and not prediction_has_event(int(p["id"]), "learned"):
+                    learn_targets.setdefault((p["lottery"], p["modality"]), []).append({
+                        "prediction_id": int(p["id"]),
+                        "evaluation": ev,
+                    })
+                    if not is_new_evaluation:
+                        relearned_existing += 1
+            except Exception as exc:
+                errors.append(f"evaluate/prepare #{p.get('id')}: {type(exc).__name__}: {exc}")
+
+        # Recalibrate every modality that has at least one newly learnable case.
+        # The current result is now part of history because it arrived before this
+        # recalibration step; it can therefore legitimately influence future draws.
+        for (lot, modality), targets in sorted(learn_targets.items()):
             try:
                 rows = get_results(lot, limit=3000)
-                if len(rows) >= 25:
-                    result = calibrate(rows, modality, max_cases=40)
-                    save_model(lot, modality, result.model_name, result.weights, result.score, result.cases)
-                    learned.append({
-                        "lottery": lot, "modality": modality, "model": result.model_name,
-                        "score": result.score, "cases": result.cases, "metrics": result.metrics,
+                if len(rows) < 25:
+                    raise ValueError(f"Histórico insuficiente para recalibração: {len(rows)} registros")
+                result = calibrate(rows, modality, max_cases=40)
+                save_model(lot, modality, result.model_name, result.weights, result.score, result.cases)
+                for target in targets:
+                    add_prediction_event(int(target["prediction_id"]), "learned", {
+                        "lottery": lot, "modality": modality,
+                        "model": result.model_name, "score": result.score,
+                        "cases": result.cases, "metrics": result.metrics,
+                        "reason": "post-result walk-forward recalibration",
                     })
+                learned.append({
+                    "lottery": lot, "modality": modality, "model": result.model_name,
+                    "score": result.score, "cases": result.cases, "metrics": result.metrics,
+                    "predictions_learned": [t["prediction_id"] for t in targets],
+                })
             except Exception as exc:
                 errors.append(f"calibration {lot}/{modality}: {type(exc).__name__}: {exc}")
 
-        log_learning_run(trigger, synced_rows, evaluated, pending_seen, errors)
+        log_learning_run(trigger, synced_rows, evaluated_new, pending_seen, errors)
         counts = prediction_counts()
         return {
             "status": "ok", "trigger": trigger, "synced_rows": synced_rows,
-            "evaluated": evaluated, "pending_seen": pending_seen,
-            "predictions": counts, "learned": learned, "errors": errors,
+            "evaluated": evaluated_new, "relearned_existing": relearned_existing,
+            "pending_seen": pending_seen, "predictions": counts,
+            "learned": learned, "errors": errors,
         }
 
     @router.get("/status")

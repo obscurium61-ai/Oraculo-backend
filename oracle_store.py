@@ -357,6 +357,34 @@ def mark_prediction_evaluated(prediction_id: int, evaluation: dict) -> None:
         ))
 
 
+
+
+def prediction_has_event(prediction_id: int, event_type: str) -> bool:
+    """Return True when a prediction already has a lifecycle event of event_type."""
+    ensure_schema()
+    with engine.connect() as conn:
+        row = conn.execute(select(prediction_events.c.id).where(and_(
+            prediction_events.c.prediction_id == prediction_id,
+            prediction_events.c.event_type == event_type,
+        )).limit(1)).first()
+    return row is not None
+
+
+def add_prediction_event(prediction_id: int, event_type: str, payload: dict) -> None:
+    """Append a prediction lifecycle event once; duplicates are harmlessly ignored."""
+    ensure_schema()
+    with engine.begin() as conn:
+        exists = conn.execute(select(prediction_events.c.id).where(and_(
+            prediction_events.c.prediction_id == prediction_id,
+            prediction_events.c.event_type == event_type,
+        )).limit(1)).first()
+        if exists:
+            return
+        conn.execute(prediction_events.insert().values(
+            prediction_id=prediction_id, event_type=event_type,
+            payload_json=json_dumps(payload), created_at=now_utc(),
+        ))
+
 def save_model(lottery: str, modality: str, model_name: str, weights: dict, score: float, cases: int) -> None:
     ensure_schema()
     with engine.begin() as conn:
