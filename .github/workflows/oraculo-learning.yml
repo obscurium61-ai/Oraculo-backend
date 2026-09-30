@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Sincronizar, avaliar, aprender e preparar previsões
+      - name: Sincronizar, avaliar, aprender e congelar os próximos palpites
         env:
           ORACULO_API_URL: https://oraculo-backend-mor3.onrender.com
         run: |
