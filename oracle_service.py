@@ -103,12 +103,34 @@ def _moment_from_draw(draw: dict | None) -> dict:
 
 
 def _model_for(lottery: str, modality: str, rows: list[dict]) -> dict:
+    # Modelos antigos do banco podem ter a estrutura V2/V3 (frequency/recency/delay)
+    # e quebrariam a V5 com KeyError ao pontuar. Detectamos esse legado e fazemos
+    # uma migração segura para o modelo balanceado da V5, sem travar a primeira
+    # previsão com uma calibração pesada. O ciclo de aprendizado posterior pode
+    # recalibrar e substituir esse modelo com a estrutura atual.
+    required = {"freq", "recent", "overdue", "digits", "transition", "group", "prize1"}
     stored = load_model(lottery, modality)
     if stored:
-        return {"model_name": stored["model_name"], "weights": stored["weights_json"], "score": stored["score"], "cases": stored["cases"]}
-    cal = calibrate(rows, modality, max_cases=60)
-    save_model(lottery, modality, cal["model_name"], cal["weights"], cal["score"], cal["cases"])
-    return {"model_name": cal["model_name"], "weights": cal["weights"], "score": cal["score"], "cases": cal["cases"], "metrics": cal.get("metrics", {}), "alternatives": cal.get("alternatives", [])}
+        weights = stored.get("weights_json") or {}
+        if isinstance(weights, dict) and required.issubset(weights.keys()):
+            model_name = stored.get("model_name") if stored.get("model_name") in MODEL_FAMILIES else "balanced"
+            return {
+                "model_name": model_name,
+                "weights": weights,
+                "score": float(stored.get("score") or 0.0),
+                "cases": int(stored.get("cases") or 0),
+            }
+        # Legacy/incompatible model: overwrite with a valid V5 model immediately.
+        fallback = MODEL_FAMILIES["balanced"]
+        save_model(lottery, modality, "balanced", fallback, 0.0, 0)
+        return {"model_name": "balanced", "weights": fallback, "score": 0.0, "cases": 0, "migrated_legacy": True}
+
+    # Cold start: use a valid V5 baseline immediately. Heavy walk-forward calibration
+    # is performed by /api/oracle/learn-now or /api/oracle/cycle, not on the user's
+    # first screen load. This avoids Render request timeouts while preserving learning.
+    fallback = MODEL_FAMILIES["balanced"]
+    save_model(lottery, modality, "balanced", fallback, 0.0, 0)
+    return {"model_name": "balanced", "weights": fallback, "score": 0.0, "cases": 0, "cold_start": True}
 
 
 def _mode_description(mode: str, lottery: str, target_date: date, draw_time: str | None, rows: list[dict], model: dict, prev: dict | None, special: dict | None) -> str:
@@ -130,17 +152,37 @@ def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch
     router = APIRouter(prefix="/api/oracle", tags=["oracle"])
     ensure_schema()
 
+    def _dedupe_rows(rows: list[dict]) -> list[dict]:
+        # Fontes históricas às vezes repetem uma mesma linha (especialmente o 7º/8º prêmio).
+        # Persistimos somente uma ocorrência por sorteio+prêmio+número.
+        seen = set()
+        out = []
+        for row in rows or []:
+            key = (
+                str(row.get("lottery") or ""),
+                str(row.get("draw_date") or row.get("date") or ""),
+                _canonical(str(row.get("lottery") or ""), str(row.get("draw_time") or "")) if row.get("draw_time") else "",
+                int(row.get("prize") or 0),
+                str(row.get("number") or "").zfill(4)[-4:],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+        return out
+
     async def sync_one(lottery: str, day: date) -> tuple[int, str]:
         if lottery == "LOOK Goiás":
-            rows = await fetch_look(day)
+            rows = _dedupe_rows(await fetch_look(day))
             return upsert_results(rows), "LOOK"
         if lottery == "PT-RIO":
             rows = await fetch_rio(day)
             for row in rows:
                 row["draw_time"] = _canonical("PT-RIO", row.get("draw_time", ""))
+            rows = _dedupe_rows(rows)
             return upsert_results(rows), "PT-RIO"
         if lottery in {"Para Todos-SP", "LNS Nacional"}:
-            rows = await fetch_aggregated(day, lottery)
+            rows = _dedupe_rows(await fetch_aggregated(day, lottery))
             return upsert_results(rows), lottery
         raise HTTPException(400, f"Loteria não suportada: {lottery}")
 
@@ -438,7 +480,15 @@ def register_oracle_routes(app, fetch_look: Callable, fetch_rio: Callable, fetch
         rows = get_results(lottery, limit=5000)
         rows = [r for r in rows if r["draw_date"] == day.isoformat()]
         rows.sort(key=lambda r: (r["draw_time"], int(r.get("prize") or 999)))
-        return {"status":"ok","lottery":lottery,"date":day.isoformat(),"count":len(rows),"results":rows,"sync_error":sync_error}
+        unique = []
+        seen = set()
+        for r in rows:
+            key = (r["draw_time"], int(r.get("prize") or 0), str(r.get("number") or "").zfill(4)[-4:])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(r)
+        return {"status":"ok","lottery":lottery,"date":day.isoformat(),"count":len(unique),"results":unique,"sync_error":sync_error}
 
     @router.get("/super")
     async def super_endpoint(type:str=Query("milhar"),draw_date:str=Query(...)):
