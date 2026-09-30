@@ -1,0 +1,36 @@
+name: Oráculo Learning Cycle
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync today's results
+        run: |
+          curl --fail --retry 2 --max-time 90 \
+            "${ORACULO_API_URL}/api/oracle/sync" \
+            || exit 1
+      - name: Evaluate frozen predictions
+        run: |
+          curl --fail --retry 2 --max-time 60 \
+            "${ORACULO_API_URL}/api/oracle/evaluate-pending" \
+            || exit 1
+      - name: Recalibrate core models
+        run: |
+          set -e
+          for lottery in "PT-RIO" "Para Todos-SP" "LOOK Goiás" "LNS Nacional"; do
+            for modality in milhar centena dezena grupo; do
+              curl --fail --retry 1 --max-time 120 \
+                --get \
+                --data-urlencode "lottery=${lottery}" \
+                --data-urlencode "modality=${modality}" \
+                "${ORACULO_API_URL}/api/oracle/calibrate" \
+                || echo "Calibration skipped: ${lottery}/${modality}"
+            done
+          done
+    env:
+      ORACULO_API_URL: ${{ secrets.ORACULO_API_URL }}
