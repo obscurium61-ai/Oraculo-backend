@@ -14,3 +14,6 @@ Build: `pip install -r requirements.txt`
 Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
 Confirme sempre os resultados no site de origem. A estatística histórica não prevê nem garante resultados futuros.
+
+## V2
+See README_V2.md for the persistent learning layer.

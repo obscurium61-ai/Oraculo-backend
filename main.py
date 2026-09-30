@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "1.3.1-candidate"
+VERSION = "2.0.0-learning"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -789,6 +789,7 @@ async def aggregated_results(
         })
 
     rows, source_url = await fetch_resultado_facil(requested_day, canonical)
+    upsert_results(rows)
     return {
         "status":"ok","date":requested_day.isoformat(),"lottery":canonical,
         "source":source_url,"count":len(rows),"results":rows,
@@ -1032,6 +1033,7 @@ async def rio_results(draw_date: Optional[date] = Query(default=None)):
             "source":source_url or "resultadofacil.com.br / ojogodobicho.com",
             "message":"Não foi possível extrair resultados reconhecíveis do Rio para a data selecionada. Nenhum resultado de outra data foi usado."
         })
+    upsert_results(rows)
     return {"status":"ok", "lottery":"PT-RIO", "date":requested_day.isoformat(),
             "source":source_url, "count":len(rows), "results":rows,
             "note":"Resultados extraídos de tabelas da fonte; horários conforme identificados na página."}
@@ -1103,6 +1105,7 @@ async def results(
             "message": "Nenhum resultado publicado e validado foi encontrado para essa data/horário. Nenhum dado de outro dia foi reaproveitado."
         })
 
+    upsert_results(parsed)
     return {
         "status": "ok",
         "lottery": "LOOK Goiás",
@@ -1113,3 +1116,55 @@ async def results(
         "results": parsed,
         "note": "Confira os dados na fonte original. A extração depende da estrutura e disponibilidade do site."
     }
+
+
+# ---------------------------------------------------------------------------
+# Oráculo Learning Backend V2
+# Keeps the existing result parsers/routes intact and adds persistent history,
+# walk-forward calibration and frozen prediction records.
+# ---------------------------------------------------------------------------
+from oracle_service import register_oracle_routes
+from oracle_store import upsert_results
+
+async def _oracle_fetch_look(day):
+    url = validate_source_url(source_url_for(day))
+    html = await fetch_html(url)
+    rows = parse_look_page(html, day)
+    if day == brazil_today():
+        now_local = datetime.now(BRAZIL_TZ)
+        rows = [r for r in rows if datetime.combine(
+            day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ
+        ) <= now_local]
+    return rows
+
+async def _oracle_fetch_rio(day):
+    rows = []
+    if day == brazil_today():
+        try:
+            html = await fetch_html(RIO_URL)
+            rows = parse_rio_page(html, day)
+        except HTTPException:
+            rows = []
+    else:
+        try:
+            html = await fetch_rio_archive(day)
+            rows = parse_rio_archive(html, day)
+        except HTTPException:
+            rows = []
+    if not rows:
+        try:
+            rows, _ = await fetch_resultado_facil(day, "PT-RIO")
+        except HTTPException:
+            rows = []
+    if day == brazil_today():
+        now_local = datetime.now(BRAZIL_TZ)
+        rows = [r for r in rows if datetime.combine(day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+    if not rows:
+        raise HTTPException(404, f"PT-RIO sem resultados para {day.isoformat()}")
+    return rows
+
+async def _oracle_fetch_aggregated(day, lottery):
+    rows, _ = await fetch_resultado_facil(day, lottery)
+    return rows
+
+register_oracle_routes(app, _oracle_fetch_look, _oracle_fetch_rio, _oracle_fetch_aggregated)

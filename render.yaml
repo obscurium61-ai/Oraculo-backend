@@ -15,3 +15,5 @@ services:
         value: www.ojogodobicho.com,ojogodobicho.com
       - key: CACHE_TTL_SECONDS
         value: "600"
+      - key: DATABASE_URL
+        sync: false
