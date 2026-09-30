@@ -4658,7 +4658,7 @@ function renderOracleModalidades(){
         try{
             for(let i=localStorage.length-1;i>=0;i--){
                 const k=localStorage.key(i);
-                if(k && (k.startsWith('ORACULO_V8|') || k.startsWith('ORACULO_V11|') || k.startsWith('ORACULO_V11_SNAPSHOT|') || k.startsWith('ORACULO_V13|') || k.startsWith('ORACULO_V14|'))) localStorage.removeItem(k);
+                if(k && (k.startsWith('ORACULO_V8|') || k.startsWith('ORACULO_V11|') || k.startsWith('ORACULO_V11_SNAPSHOT|') || k.startsWith('ORACULO_V13|') || k.startsWith('ORACULO_V14|') || k.startsWith('ORACULO_V15|') || k.startsWith('ORACULO_V15_SNAPSHOT|'))) localStorage.removeItem(k);
             }
         }catch(_){}
         // Inicializa Mago
@@ -4771,12 +4771,14 @@ function renderOracleModalidades(){
     }
     async function apiGet(path, params, requestId){
         const controller=new AbortController();
-        const timer=setTimeout(()=>controller.abort(),15000);
+        // O Render Free pode levar cerca de 1 minuto para acordar depois do
+        // spin-down. 15s fazia o app tratar um cold start normal como erro.
+        const timer=setTimeout(()=>controller.abort(),90000);
         let response;
         try{
             response=await fetch(apiUrl(path,params),{headers:{Accept:'application/json'},cache:'no-store',signal:controller.signal});
         }catch(err){
-            if(err?.name==='AbortError') throw new Error('O servidor demorou mais de 15 segundos para responder.');
+            if(err?.name==='AbortError') throw new Error('O servidor demorou mais tempo para acordar/responder.');
             throw err;
         }finally{ clearTimeout(timer); }
         const data=await response.json().catch(()=>({}));
@@ -4937,7 +4939,7 @@ function renderOracleModalidades(){
                 shown.forEach(r=>{
                     const line=document.createElement('div'); line.className='oracle-result-line';
                     const b=finalBicho(r.number.slice(-2));
-                    line.innerHTML=`<span class="place">${Number(r.prize)||0}º</span><strong class="result-number">${escapeHtmlFinal(String(r.number).padStart(4,'0'))}</strong><span class="result-bicho">${escapeHtmlFinal(b.nome)}</span>`;
+                    line.innerHTML=`<span class="place">${Number(r.prize)||0}º</span><strong class="result-number">${escapeHtmlFinal(String(r.number).padStart(4,'0'))}</strong><span class="result-bicho">${escapeHtmlFinal(b.nome)} · Grupo ${escapeHtmlFinal(String(b.grupo))}</span>`;
                     card.appendChild(line);
                 });
                 container.appendChild(card);
@@ -5023,6 +5025,7 @@ function renderOracleModalidades(){
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
+  font-size:.96em;
 }
 #oraculoPanel .oracle-card-head span:last-child{
   flex:0 0 auto;
