@@ -4743,6 +4743,7 @@ function renderOracleModalidades(){
     let finalOracleModality = 'milhar';
     let finalOracleTime = '';
     let finalOracleSuperType = 'milhar';
+    let finalOracleBusy = false;
 
     const FINAL_LOTTERIES = [
         {id:'pt_rio', name:'PT-RIO', api:'PT-RIO', horarios:['09:20','11:20','14:20','16:20','18:20','21:20']},
@@ -4769,7 +4770,15 @@ function renderOracleModalidades(){
         return `${FINAL_API}${path}?${q.toString()}`;
     }
     async function apiGet(path, params, requestId){
-        const response=await fetch(apiUrl(path,params),{headers:{Accept:'application/json'},cache:'no-store'});
+        const controller=new AbortController();
+        const timer=setTimeout(()=>controller.abort(),15000);
+        let response;
+        try{
+            response=await fetch(apiUrl(path,params),{headers:{Accept:'application/json'},cache:'no-store',signal:controller.signal});
+        }catch(err){
+            if(err?.name==='AbortError') throw new Error('O servidor demorou mais de 15 segundos para responder.');
+            throw err;
+        }finally{ clearTimeout(timer); }
         const data=await response.json().catch(()=>({}));
         if(requestId!==undefined && requestId!==finalRequestId) throw new Error('stale_request');
         if(!response.ok) {
@@ -4879,6 +4888,8 @@ function renderOracleModalidades(){
     }
     window.generateOraclePicks=async function(){
         if(finalOracleMode==='super'){ return renderFinalSuper(finalOracleSuperType); }
+        if(finalOracleBusy) return;
+        finalOracleBusy=true;
         const lot=selectedFinalLottery();
         const requestId=++finalRequestId;
         const mode=finalOracleMode;
@@ -4900,6 +4911,7 @@ function renderOracleModalidades(){
             const cutoff=data.cutoff_iso ? new Date(data.cutoff_iso).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
             renderFinalEngine(frozen ? `✦ Palpite congelado no servidor. Novos resultados não alteram esta previsão.${cutoff?` Corte: ${cutoff}.`:''}` : `✦ Palpite calculado e gravado antes do sorteio.${cutoff?` Corte de dados: ${cutoff}.`:''}`);
         }catch(err){ if(err.message==='stale_request') return; renderFinalError(err); }
+        finally{ finalOracleBusy=false; }
     };
     window.loadOracleResults=async function(){
         const date=document.getElementById('oracleDate')?.value||finalToday(); const lot=selectedFinalLottery();
