@@ -4840,7 +4840,7 @@ function renderOracleModalidades(){
     }
     window.renderOracleHorarios=renderFinalOracleHorarios;
     window.renderOracleModalidades=function(){
-        const c=document.getElementById('oracleModalidadeList'); if(!c) return; c.innerHTML='';
+        const c=document.getElementById('oracleModalidadeList'); if(!c) return; c.innerHTML=''; c.scrollTop=0;
         MODALIDADES.forEach((m,idx)=>{
             const b=document.createElement('div'); b.className='item-btn'+(finalOracleModality===m.id?' active':'');
             b.innerHTML=`<span>${escapeHtmlFinal(m.nome)}</span><span class="multiplicador">${escapeHtmlFinal(m.mult)}</span>`;
@@ -4908,15 +4908,29 @@ function renderOracleModalidades(){
             const data=await apiGet('/api/oracle/results',{lottery:lot.api,draw_date:date,sync:true});
             const container=document.getElementById('oracleResults');
             const grouped={};
-            (data.results||[]).forEach(r=>{(grouped[r.draw_time] ||= []).push(r);});
-            Object.entries(grouped).sort(([a],[b])=>a.localeCompare(b)).forEach(([time,rows])=>{
-                const card=document.createElement('div'); card.className='oracle-card';
-                const head=document.createElement('div'); head.className='oracle-card-head'; head.innerHTML=`<span>${escapeHtmlFinal(lot.name)} · ${escapeHtmlFinal(time)}</span><span>${rows.length} prêmios</span>`; card.appendChild(head);
-                rows.sort((a,b)=>Number(a.prize)-Number(b.prize)).slice(0,10).forEach(r=>{
-                    const line=document.createElement('div'); line.className='oracle-result-line'; const b=finalBicho(r.number.slice(-2)); line.innerHTML=`<span>${r.prize}º</span><strong>${escapeHtmlFinal(String(r.number).padStart(4,'0'))}</strong><span>${escapeHtmlFinal(b.nome)}</span>`; card.appendChild(line);
-                }); container.appendChild(card);
+            const seen=new Set();
+            (data.results||[]).forEach(r=>{
+                const key=`${r.draw_time}|${Number(r.prize)||0}|${String(r.number||'').padStart(4,'0').slice(-4)}`;
+                if(seen.has(key)) return;
+                seen.add(key);
+                (grouped[r.draw_time] ||= []).push(r);
             });
-            setText('oracleStatus',`${data.count||0} resultados encontrados para ${date.split('-').reverse().join('/')}.`);
+            let visibleCount=0;
+            Object.entries(grouped).sort(([a],[b])=>a.localeCompare(b)).forEach(([time,rows])=>{
+                rows.sort((a,b)=>Number(a.prize)-Number(b.prize));
+                const shown=rows.slice(0,10);
+                visibleCount += shown.length;
+                const card=document.createElement('div'); card.className='oracle-card';
+                const head=document.createElement('div'); head.className='oracle-card-head'; head.innerHTML=`<span>${escapeHtmlFinal(lot.name)} · ${escapeHtmlFinal(time)}</span><span>${shown.length} prêmios</span>`; card.appendChild(head);
+                shown.forEach(r=>{
+                    const line=document.createElement('div'); line.className='oracle-result-line';
+                    const b=finalBicho(r.number.slice(-2));
+                    line.innerHTML=`<span class="place">${Number(r.prize)||0}º</span><strong class="result-number">${escapeHtmlFinal(String(r.number).padStart(4,'0'))}</strong><span class="result-bicho">${escapeHtmlFinal(b.nome)}</span>`;
+                    card.appendChild(line);
+                });
+                container.appendChild(card);
+            });
+            setText('oracleStatus',`${visibleCount} resultados encontrados para ${date.split('-').reverse().join('/')}.`);
         }catch(err){ setText('oracleStatus',`Não foi possível consultar: ${err.message}`); }
     };
     async function renderFinalSuper(type){
@@ -4957,6 +4971,50 @@ function renderOracleModalidades(){
 #oraculoPanel .final-oracle-engine{margin-top:12px}
 #oraculoPanel .engine-waiting{filter:saturate(.72);opacity:.92}
 #oraculoPanel .oracle-engine-card{border-radius:18px;overflow:hidden}
+</style>
+
+
+<style id="oraculo-final-polish">
+#oraculoPanel .modalidade-list{
+  max-height:240px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  scroll-behavior:smooth;
+  padding-right:2px;
+}
+#oraculoPanel .modalidade-list .item-btn{
+  min-height:54px;
+  box-sizing:border-box;
+  flex:0 0 auto;
+}
+#oraculoPanel .oracle-card{
+  padding:14px 12px;
+}
+#oraculoPanel .oracle-result-line{
+  display:grid;
+  grid-template-columns:42px 84px minmax(0,1fr);
+  align-items:center;
+  column-gap:10px;
+  min-height:36px;
+  padding:7px 4px;
+}
+#oraculoPanel .oracle-result-line .place{
+  text-align:left;
+  color:#b7cbd5;
+}
+#oraculoPanel .oracle-result-line .result-number{
+  text-align:center;
+  letter-spacing:.4px;
+}
+#oraculoPanel .oracle-result-line .result-bicho{
+  text-align:right;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+#oraculoPanel .oracle-card-head span:last-child{
+  flex:0 0 auto;
+}
 </style>
 
 </body>
