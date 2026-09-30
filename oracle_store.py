@@ -26,6 +26,7 @@ from sqlalchemy import (
     select,
     and_,
     desc,
+    update,
 )
 from sqlalchemy.engine import Engine
 
@@ -112,8 +113,71 @@ def json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+PT_RIO_CANONICAL_BY_CODE = {
+    "PPT": "09:20",
+    "PTM": "11:20",
+    "PT": "14:20",
+    "PTV": "16:20",
+    "PTN": "18:20",
+    "COR": "21:20",
+}
+PT_RIO_TIME_ALIASES = {
+    "09:30": "09:20",
+    "11:30": "11:20",
+    "14:30": "14:20",
+    "16:30": "16:20",
+    "21:30": "21:20",
+}
+
+def canonical_oracle_draw_time(lottery: str, draw_time: str, draw_code: str | None = None) -> str:
+    """Normalize PT-RIO to the schedule used by the Oráculo/UI.
+
+    Some source pages expose PT-RIO draw codes with source-specific times
+    (for example 09:30/11:30 on Wednesdays). The Oráculo uses the canonical
+    user-facing PT-RIO schedule 09:20/11:20/14:20/16:20/18:20/21:20.
+    """
+    if lottery != "PT-RIO":
+        return str(draw_time or "")[:5]
+    code = (str(draw_code or "").strip().upper() or None)
+    if code in PT_RIO_CANONICAL_BY_CODE:
+        return PT_RIO_CANONICAL_BY_CODE[code]
+    raw = str(draw_time or "")[:5]
+    return PT_RIO_TIME_ALIASES.get(raw, raw)
+
+
+def normalize_existing_pt_rio_times() -> int:
+    """Migrate previously stored PT-RIO rows to canonical Oráculo times."""
+    changed = 0
+    with engine.begin() as conn:
+        rows = conn.execute(select(results).where(results.c.lottery == "PT-RIO")).mappings().all()
+        for row in rows:
+            draw_code = None
+            raw = row.get("raw_json")
+            if raw:
+                try:
+                    payload = json.loads(raw)
+                    draw_code = payload.get("draw_code")
+                except Exception:
+                    pass
+            target_time = canonical_oracle_draw_time("PT-RIO", row["draw_time"], draw_code)
+            if target_time and target_time != row["draw_time"]:
+                conn.execute(
+                    update(results)
+                    .where(results.c.id == row["id"])
+                    .values(draw_time=target_time)
+                )
+                changed += 1
+    return changed
+
+
 def ensure_schema() -> None:
     metadata.create_all(engine)
+    # Keep PT-RIO timestamps consistent with the Oráculo/UI schedule.
+    try:
+        normalize_existing_pt_rio_times()
+    except Exception:
+        # Schema initialization must not fail because a legacy row has malformed raw JSON.
+        pass
 
 
 def database_info() -> dict:
@@ -136,7 +200,11 @@ def upsert_results(rows: Iterable[dict]) -> int:
         for row in rows:
             lottery = str(row.get("lottery") or "").strip()
             draw_date = str(row.get("date") or "")[:10]
-            draw_time = str(row.get("draw_time") or "")[:5]
+            draw_time = canonical_oracle_draw_time(
+                lottery,
+                str(row.get("draw_time") or "")[:5],
+                row.get("draw_code"),
+            )
             prize = int(row.get("prize") or 0)
             number = str(row.get("number") or "").strip()
             group_code = str(row.get("group") or "").zfill(2)

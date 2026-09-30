@@ -11,7 +11,7 @@ from oracle_engine import calibrate, predict, evaluate_prediction
 from oracle_store import (
     ensure_schema, database_info, upsert_results, get_results, get_prediction,
     save_prediction, save_model, load_model, pending_predictions,
-    mark_prediction_evaluated, log_sync,
+    mark_prediction_evaluated, log_sync, canonical_oracle_draw_time,
 )
 
 ORACLE_LOTTERIES = ["PT-RIO", "Para Todos-SP", "LOOK Goiás", "LNS Nacional"]
@@ -38,6 +38,8 @@ def register_oracle_routes(
             return upsert_results(rows), "LOOK"
         if lottery == "PT-RIO":
             rows = await fetch_rio(day)
+            for row in rows:
+                row["draw_time"] = canonical_oracle_draw_time("PT-RIO", row.get("draw_time", ""), row.get("draw_code"))
             return upsert_results(rows), "PT-RIO"
         if lottery in {"Para Todos-SP", "LNS Nacional"}:
             rows = await fetch_aggregated(day, lottery)
@@ -127,16 +129,22 @@ def register_oracle_routes(
             raise HTTPException(400, "Loteria não suportada")
         if modality not in ORACLE_MODALITIES:
             raise HTTPException(400, "Modalidade não suportada")
-        frozen = get_prediction(lottery, draw_date, draw_time, modality)
+        target_canonical_time = canonical_oracle_draw_time(lottery, draw_time)
+        frozen = get_prediction(lottery, draw_date, target_canonical_time, modality)
         if frozen and not force_retrain:
             return {"status": "frozen", "prediction": frozen["prediction"], "record": frozen}
 
+        draw_time = target_canonical_time
         cutoff = _target_cutoff(draw_date, draw_time)
         # Never create a brand-new "prediction" after the target result is
         # already stored. That would make a historical result look like a
         # forecast. Historical testing belongs to /calibrate, not /predict.
         target_rows = get_results(lottery, limit=3000)
-        target_exists = any(r["draw_date"] == draw_date and r["draw_time"] == draw_time for r in target_rows)
+        target_exists = any(
+            r["draw_date"] == draw_date
+            and canonical_oracle_draw_time(lottery, r["draw_time"], r.get("draw_code")) == target_canonical_time
+            for r in target_rows
+        )
         if target_exists:
             raise HTTPException(409, "O sorteio alvo já possui resultado armazenado e não tinha previsão congelada. Não é permitida previsão retroativa.")
 
@@ -161,23 +169,71 @@ def register_oracle_routes(
         return {"status": "calculated", "prediction_id": prediction_id, **pack, "cutoff_iso": cutoff}
 
     @router.get("/evaluate-pending")
-    def evaluate_pending(lottery: Optional[str] = None):
+    async def evaluate_pending(lottery: Optional[str] = None):
         pending = pending_predictions(lottery=lottery)
         evaluated = 0
+        synced = 0
+        sync_errors = []
+        learned = []
+        touched = set()
+
+        # The learning loop must see newly published results before evaluating.
+        # The previous V2 required a separate manual /sync call, which is why a
+        # just-published draw could remain invisible to this endpoint.
+        dates_to_sync = sorted({(p["lottery"], p["draw_date"]) for p in pending})
+        for lot, date_text in dates_to_sync:
+            try:
+                n, _ = await sync_one(lot, date.fromisoformat(date_text))
+                synced += n
+            except Exception as exc:
+                sync_errors.append(f"{date_text} {lot}: {type(exc).__name__}: {exc}")
+
         for p in pending:
             rows = get_results(p["lottery"], limit=3000)
-            target_dt = f"{p['draw_date']}T{p['draw_time']}:00"
-            actual = [r for r in rows if r["draw_date"] == p["draw_date"] and r["draw_time"] == p["draw_time"]]
-            # Use only published rows; evaluation naturally occurs after the draw exists.
+            target_time = canonical_oracle_draw_time(p["lottery"], p["draw_time"])
+            target_dt = f"{p['draw_date']}T{target_time}:00"
+            actual = [
+                r for r in rows
+                if r["draw_date"] == p["draw_date"]
+                and canonical_oracle_draw_time(p["lottery"], r["draw_time"], r.get("draw_code")) == target_time
+            ]
             if not actual:
                 continue
             candidates = p.get("candidates_json") or []
             ev = evaluate_prediction(p["prediction"], actual, p["modality"], candidates)
-            ev["score"] = round(float(ev.get("exact", False)) + 0.3 * float(ev.get("tail", False)) + 0.2 * float(ev.get("group", False)), 4)
+            ev["score"] = round(
+                float(ev.get("exact", False))
+                + 0.3 * float(ev.get("tail", False))
+                + 0.2 * float(ev.get("group", False)),
+                4,
+            )
             ev["target"] = target_dt
             mark_prediction_evaluated(int(p["id"]), ev)
             evaluated += 1
-        return {"status": "ok", "evaluated": evaluated, "pending_before": len(pending)}
+            touched.add((p["lottery"], p["modality"]))
+
+        # Immediately recalibrate modalities that just received a new evaluated case.
+        for lot, modality in sorted(touched):
+            try:
+                rows = get_results(lot, limit=3000)
+                if len(rows) >= 25:
+                    result = calibrate(rows, modality, max_cases=40)
+                    save_model(lot, modality, result.model_name, result.weights, result.score, result.cases)
+                    learned.append({
+                        "lottery": lot, "modality": modality,
+                        "model": result.model_name, "score": result.score, "cases": result.cases,
+                    })
+            except Exception as exc:
+                sync_errors.append(f"calibration {lot}/{modality}: {type(exc).__name__}: {exc}")
+
+        return {
+            "status": "ok",
+            "evaluated": evaluated,
+            "pending_before": len(pending),
+            "synced_rows": synced,
+            "learned": learned,
+            "errors": sync_errors,
+        }
 
     app.include_router(router)
     return router
