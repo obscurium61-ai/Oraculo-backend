@@ -3514,7 +3514,7 @@ function generateOraclePicks(){
    • V15 não lê nem reutiliza memórias/snapshots de V13/V14.
    ====================================================================== */
 
-const ORACLE_V15_NS = 'ORACULO_V16';
+const ORACLE_V15_NS = 'ORACULO_V18';
 
 function oracleV15SPNow(){
     const s = new Date().toLocaleString('en-US',{timeZone:'America/Sao_Paulo'});
@@ -5958,5 +5958,87 @@ function renderOracleModalidades(){
   };
 })();
 </script>
+
+
+<script id="oraculo-v19-recent-repeat">
+/* Oráculo V19 — proteção inteligente contra repetição recente.
+   IMPORTANTE:
+   - Não bloqueia números que saíram há semanas/meses.
+   - Milhares saídas hoje (antes do horário-alvo) ou ontem ficam bloqueadas.
+   - A partir de 2 dias completos para trás, a milhar volta a poder concorrer.
+   - O histórico completo continua sendo usado pelas estatísticas; esta regra
+     afeta APENAS a seleção final da Milhar.
+*/
+(function(){
+  'use strict';
+  const E=window.OraculoV13;
+  if(!E || typeof E.buildPortfolio!=='function' || E.__v19RecentRepeatWrapped) return;
+
+  function normalize4(value){
+    const n=String(value??'').replace(/\D/g,'').slice(-4).padStart(4,'0');
+    return /^\d{4}$/.test(n)?n:null;
+  }
+  function isoDate(value){
+    const s=String(value||'');
+    return /^\d{4}-\d{2}-\d{2}$/.test(s)?s:null;
+  }
+  function shiftIso(iso,days){
+    const d=new Date(`${iso}T12:00:00Z`);
+    if(Number.isNaN(d.getTime())) return iso;
+    d.setUTCDate(d.getUTCDate()+days);
+    return d.toISOString().slice(0,10);
+  }
+
+  // Apenas hoje + ontem. Assim:
+  //  - saiu mais cedo hoje -> não repete;
+  //  - saiu ontem -> não repete;
+  //  - saiu há 2+ dias -> pode voltar normalmente.
+  function recentHardMilharSet(stats, previousRows){
+    const reference=isoDate(stats?.referenceDate) || isoDate(previousRows?.[0]?.date);
+    if(!reference) return new Set();
+    const yesterday=shiftIso(reference,-1);
+    const out=new Set();
+    const rows=[];
+    if(Array.isArray(stats?.ordered)) rows.push(...stats.ordered);
+    if(Array.isArray(previousRows)) rows.push(...previousRows);
+    for(const r of rows){
+      const date=isoDate(r?.date);
+      if(!date || (date!==reference && date!==yesterday)) continue;
+      const n=normalize4(r?.number);
+      if(n) out.add(n);
+    }
+    return out;
+  }
+
+  const originalBuildPortfolio=E.buildPortfolio;
+  E.buildPortfolio=function(stats, baseContext, options={}, avoidPortfolio={}){
+    const merged={...(avoidPortfolio||{})};
+    const hard=recentHardMilharSet(stats, options?.previousRows);
+    const existing=Array.isArray(merged.milhar)?merged.milhar.map(String):[];
+    merged.milhar=[...new Set([...existing,...hard])];
+    return originalBuildPortfolio.call(this, stats, baseContext, options, merged);
+  };
+
+  E.__v19RecentRepeatWrapped=true;
+
+  // Não reutilizar snapshots antigos das versões que tinham a regra global de
+  // exclusão. O histórico estatístico continua intacto; só os palpites congelados
+  // precisam ser recalculados uma vez sob a regra V19.
+  try{
+    const prefixes=[
+      'ORACULO_V16|','ORACULO_FINAL_V12|','ORACULO_FINAL_V13|','ORACULO_FINAL_V14|',
+      'ORACULO_FINAL_V15|','ORACULO_FINAL_V16|','ORACULO_FINAL_V17|','ORACULO_FINAL_V18|',
+      'ORACULO_V18|','ORACULO_V19|'
+    ];
+    const remove=[];
+    for(let i=localStorage.length-1;i>=0;i--){
+      const k=localStorage.key(i)||'';
+      if(prefixes.some(prefix=>k.startsWith(prefix)) || k.startsWith('ORACULO_V13_SNAPSHOT|')) remove.push(k);
+    }
+    remove.forEach(k=>localStorage.removeItem(k));
+  }catch(_){ }
+})();
+</script>
+
 </body>
 </html>
