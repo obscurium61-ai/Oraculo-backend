@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from zoneinfo import ZoneInfo
 
 APP_NAME = "Oráculo Results Bridge"
-VERSION = "5.0.2-oraculo-v10-prewarm"
+VERSION = "6.0.0-stateless-oraculo"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
@@ -791,7 +791,6 @@ async def aggregated_results(
         })
 
     rows, source_url = await fetch_resultado_facil(requested_day, canonical)
-    upsert_results(rows)
     return {
         "status":"ok","date":requested_day.isoformat(),"lottery":canonical,
         "source":source_url,"count":len(rows),"results":rows,
@@ -1035,7 +1034,6 @@ async def rio_results(draw_date: Optional[date] = Query(default=None)):
             "source":source_url or "resultadofacil.com.br / ojogodobicho.com",
             "message":"Não foi possível extrair resultados reconhecíveis do Rio para a data selecionada. Nenhum resultado de outra data foi usado."
         })
-    upsert_results(rows)
     return {"status":"ok", "lottery":"PT-RIO", "date":requested_day.isoformat(),
             "source":source_url, "count":len(rows), "results":rows,
             "note":"Resultados extraídos de tabelas da fonte; horários conforme identificados na página."}
@@ -1115,7 +1113,6 @@ async def results(
             "message": "Nenhum resultado publicado e validado foi encontrado para essa data/horário. Nenhum dado de outro dia foi reaproveitado."
         })
 
-    upsert_results(parsed)
     return {
         "status": "ok",
         "lottery": "LOOK Goiás",
@@ -1129,52 +1126,184 @@ async def results(
 
 
 # ---------------------------------------------------------------------------
-# Oráculo Learning Backend V2
-# Keeps the existing result parsers/routes intact and adds persistent history,
-# walk-forward calibration and frozen prediction records.
+# Oráculo stateless bridge
+# Sem Supabase, sem banco de aprendizagem e sem tarefas em segundo plano.
+# O servidor somente consulta as fontes externas e entrega os dados ao HTML.
+# Todo o cálculo estatístico acontece no navegador.
 # ---------------------------------------------------------------------------
-from oracle_service import register_oracle_routes
-from oracle_store import upsert_results
 
-async def _oracle_fetch_look(day):
-    url = validate_source_url(source_url_for(day))
-    html = await fetch_html(url)
-    rows = parse_look_page(html, day)
-    if day == brazil_today():
-        now_local = datetime.now(BRAZIL_TZ)
-        rows = [r for r in rows if datetime.combine(
-            day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ
-        ) <= now_local]
-    return rows
+from fastapi.responses import JSONResponse
+import asyncio
 
-async def _oracle_fetch_rio(day):
-    rows = []
+ORACLE_SCHEDULES = {
+    "PT-RIO": ["09:20", "11:20", "14:20", "16:20", "18:20", "21:20"],
+    "Para Todos-SP": ["08:20", "10:20", "12:20", "13:20", "15:20", "17:20", "19:20", "20:20"],
+    "LOOK Goiás": ["07:20", "09:20", "11:20", "14:20", "16:20", "18:20", "21:20", "23:20"],
+    "LNS Nacional": ["02:00", "08:00", "10:00", "12:00", "15:00", "17:00", "21:00", "23:00"],
+}
+
+PT_RIO_CANONICAL = {
+    "09:30": "09:20", "11:30": "11:20", "14:30": "14:20",
+    "16:30": "16:20", "18:30": "18:20", "21:30": "21:20",
+    "19:30": "18:20",  # sábado PTN: manter o rótulo usado pelo app
+    "20:00": "20:00",
+    "11:30": "11:20",
+}
+
+_ORACLE_DAY_CACHE: dict[tuple[str, str], dict] = {}
+_ORACLE_CACHE_TTL = int(os.getenv("ORACLE_RESULTS_TTL_SECONDS", "180"))
+
+def _oracle_canonical_time(lottery: str, raw: str) -> str:
+    t = str(raw or "")[:5]
+    return PT_RIO_CANONICAL.get(t, t) if lottery == "PT-RIO" else t
+
+def _oracle_normalize_row(row: dict, lottery: str) -> dict:
+    number = re.sub(r"\D", "", str(row.get("number", ""))).zfill(4)[-4:]
+    group = int(row.get("group") or row.get("group_code") or 0)
+    if not (1 <= group <= 25):
+        tail = int(number[-2:])
+        group = 25 if tail == 0 else ((tail - 1) // 4) + 1
+    time_value = _oracle_canonical_time(lottery, row.get("draw_time") or row.get("time"))
+    return {
+        "date": str(row.get("date") or row.get("draw_date") or ""),
+        "lottery": lottery,
+        "draw_time": time_value,
+        "time": time_value,
+        "prize": int(row.get("prize") or 0),
+        "number": number,
+        "group": group,
+        "source": row.get("source") or "fonte externa",
+    }
+
+def _oracle_dedupe(rows: list[dict]) -> list[dict]:
+    seen=set(); out=[]
+    for r in rows or []:
+        key=(r["date"], r["lottery"], r["draw_time"], r["prize"], r["number"])
+        if key in seen: continue
+        seen.add(key); out.append(r)
+    return sorted(out, key=lambda r:(r["date"], r["draw_time"], r["prize"], r["number"]))
+
+def _oracle_future_filter(rows: list[dict], day: date) -> list[dict]:
+    if day != brazil_today():
+        return rows
+    now_local=datetime.now(BRAZIL_TZ)
+    out=[]
+    for r in rows:
+        try:
+            dt=datetime.combine(day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ)
+            if dt <= now_local:
+                out.append(r)
+        except Exception:
+            continue
+    return out
+
+async def _oracle_fetch_look(day: date):
+    url=validate_source_url(source_url_for(day))
+    html=await fetch_html(url)
+    rows=parse_look_page(html, day)
+    return _oracle_future_filter(rows, day)
+
+async def _oracle_fetch_rio(day: date):
+    rows=[]
     if day == brazil_today():
         try:
-            html = await fetch_html(RIO_URL)
-            rows = parse_rio_page(html, day)
+            html=await fetch_html(RIO_URL)
+            rows=parse_rio_page(html, day)
         except HTTPException:
-            rows = []
+            rows=[]
     else:
         try:
-            html = await fetch_rio_archive(day)
-            rows = parse_rio_archive(html, day)
+            html=await fetch_rio_archive(day)
+            rows=parse_rio_archive(html, day)
         except HTTPException:
-            rows = []
+            rows=[]
     if not rows:
         try:
-            rows, _ = await fetch_resultado_facil(day, "PT-RIO")
+            rows,_=await fetch_resultado_facil(day, "PT-RIO")
         except HTTPException:
-            rows = []
-    if day == brazil_today():
-        now_local = datetime.now(BRAZIL_TZ)
-        rows = [r for r in rows if datetime.combine(day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local]
+            rows=[]
+    rows=_oracle_future_filter(rows, day)
     if not rows:
         raise HTTPException(404, f"PT-RIO sem resultados para {day.isoformat()}")
     return rows
 
-async def _oracle_fetch_aggregated(day, lottery):
-    rows, _ = await fetch_resultado_facil(day, lottery)
-    return rows
+async def _oracle_fetch_aggregated(day: date, lottery: str):
+    rows,_=await fetch_resultado_facil(day, lottery)
+    return _oracle_future_filter(rows, day)
 
-register_oracle_routes(app, _oracle_fetch_look, _oracle_fetch_rio, _oracle_fetch_aggregated)
+async def _oracle_day(lottery: str, day: date) -> tuple[list[dict], str | None]:
+    key=(lottery, day.isoformat())
+    cached=_ORACLE_DAY_CACHE.get(key)
+    now=time.time()
+    if cached and now-cached["at"] < _ORACLE_CACHE_TTL:
+        return cached["rows"], cached.get("error")
+    try:
+        if lottery == "LOOK Goiás":
+            raw=await _oracle_fetch_look(day)
+        elif lottery == "PT-RIO":
+            raw=await _oracle_fetch_rio(day)
+        elif lottery in {"Para Todos-SP", "LNS Nacional"}:
+            raw=await _oracle_fetch_aggregated(day, lottery)
+        else:
+            raise HTTPException(400, f"Loteria não suportada: {lottery}")
+        rows=_oracle_dedupe([_oracle_normalize_row(r, lottery) for r in raw])
+        err=None
+    except Exception as exc:
+        rows=[]
+        err=str(getattr(exc, "detail", exc))
+    _ORACLE_DAY_CACHE[key]={"at":now,"rows":rows,"error":err}
+    return rows,err
+
+@app.get("/api/oracle/status")
+async def oracle_status():
+    return {
+        "ok": True,
+        "mode": "stateless",
+        "database": False,
+        "learning": False,
+        "message": "O Oráculo calcula tudo no HTML; o servidor somente fornece resultados externos.",
+        "lotteries": list(ORACLE_SCHEDULES),
+    }
+
+@app.get("/api/oracle/results")
+async def oracle_results(
+    lottery: str = Query(..., min_length=1, max_length=60),
+    draw_date: date = Query(...),
+    draw_time: Optional[str] = Query(default=None, pattern=r"^\d{2}:\d{2}$"),
+):
+    if lottery not in ORACLE_SCHEDULES:
+        raise HTTPException(400, "Loteria não suportada.")
+    rows,err=await _oracle_day(lottery, draw_date)
+    if draw_time:
+        rows=[r for r in rows if r["draw_time"]==draw_time]
+    return {"status":"ok" if rows else "empty", "lottery":lottery, "date":draw_date.isoformat(), "results":rows, "error":err}
+
+@app.get("/api/oracle/history")
+async def oracle_history(
+    lottery: str = Query(..., min_length=1, max_length=60),
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+):
+    if lottery not in ORACLE_SCHEDULES:
+        raise HTTPException(400, "Loteria não suportada.")
+    if end_date < start_date:
+        raise HTTPException(400, "end_date deve ser maior ou igual a start_date.")
+    days=(end_date-start_date).days+1
+    if days > 21:
+        raise HTTPException(400, "A janela máxima é de 21 dias.")
+    dates=[start_date + __import__("datetime").timedelta(days=i) for i in range(days)]
+    sem=asyncio.Semaphore(4)
+    async def one(d):
+        async with sem:
+            return await _oracle_day(lottery,d)
+    results=await asyncio.gather(*(one(d) for d in dates))
+    rows=[]; errors=[]
+    for d,(day_rows,err) in zip(dates,results):
+        rows.extend(day_rows)
+        if err: errors.append({"date":d.isoformat(),"error":err})
+    return {
+        "status":"ok", "lottery":lottery, "start_date":start_date.isoformat(), "end_date":end_date.isoformat(),
+        "rows":_oracle_dedupe(rows), "errors":errors, "count":len(rows),
+        "cache_ttl_seconds":_ORACLE_CACHE_TTL,
+    }
+

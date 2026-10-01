@@ -12,8 +12,8 @@ services:
       - key: SOURCE_URL
         value: https://www.ojogodobicho.com/deu_no_poste.html
       - key: ALLOWED_SOURCE_HOSTS
-        value: www.ojogodobicho.com,ojogodobicho.com
+        value: www.ojogodobicho.com,ojogodobicho.com,www.resultadofacil.com.br,resultadofacil.com.br
       - key: CACHE_TTL_SECONDS
-        value: "600"
-      - key: DATABASE_URL
-        sync: false
+        value: "180"
+      - key: ORACLE_RESULTS_TTL_SECONDS
+        value: "180"

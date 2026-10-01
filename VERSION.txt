@@ -1,0 +1,5 @@
+Mago & Oráculo — DEFINITIVA V11
+Arquitetura: stateless / cálculo estatístico no HTML
+Banco de aprendizado: removido
+Viradinha: implementada para os dias 01–31
+Foco de score: 1º prêmio + cobertura 1º–5º
