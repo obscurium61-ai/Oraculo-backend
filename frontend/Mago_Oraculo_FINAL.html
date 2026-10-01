@@ -5380,10 +5380,11 @@ function renderOracleModalidades(){
 })(typeof window!=='undefined'?window:globalThis);
 
 </script>
-<script id="oraculo-v13-ui">
-/* Oráculo V13 — controlador definitivo.
-   Um contexto gera uma carteira completa uma única vez.
-   Sorte do Dia/Super reiniciam por data; Por Sorteio fica separado por horário.
+<script id="oraculo-v14-ui">
+/* Oráculo V14 — controlador limpo.
+   Não reutiliza snapshots V13/V12/V11.
+   Geração sob demanda, sem aprendizado/Supabase.
+   Sorte do Dia e Super por data; Por Sorteio por lote/data/horário.
 */
 (function(){
   'use strict';
@@ -5412,24 +5413,26 @@ function renderOracleModalidades(){
   ];
   const schedules=Object.fromEntries(LOTTERIES.map(x=>[x.api,x.times]));
   const state={lottery:LOTTERIES[0],mode:'dia',time:LOTTERIES[0].times[0],modality:'milhar',superType:'milhar',busy:false,request:0,cache:new Map(),lastDate:null};
-  const NS='ORACULO_V13|';
+  const NS='ORACULO_V14|';
 
   function today(){
     const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
-    const v=Object.fromEntries(parts.map(p=>[p.type,p.value])); return `${v.year}-${v.month}-${v.day}`;
+    const v=Object.fromEntries(parts.map(p=>[p.type,p.value]));
+    return `${v.year}-${v.month}-${v.day}`;
   }
   function dateOffset(iso,n){return E.shiftDate(iso,n);}
   function fmtDate(iso){return String(iso).split('-').reverse().join('/');}
   function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-  function setText(id,text){const el=document.getElementById(id);if(el)el.textContent=text;}
+  function setText(id,text){const el=document.getElementById(id);if(el)el.textContent=String(text??'');}
   function setHTML(id,html){const el=document.getElementById(id);if(el)el.innerHTML=html;}
+  function arr(v){return Array.isArray(v)?v:(v==null?[]:[v]);}
 
-  function purgeLegacySnapshots(){
+  function purgeOldSnapshots(){
     try{
       const remove=[];
       for(let i=0;i<localStorage.length;i++){
         const k=localStorage.key(i)||'';
-        if(/^ORACULO_(?:V|FINAL_V)(?:10|11|12|15|16)\|/.test(k)||/^ORACULO_FINAL_V12\|/.test(k)) remove.push(k);
+        if(/^ORACULO_(?:V|FINAL_V)(?:10|11|12|13|15|16|17)\|/.test(k)||/^ORACULO_FINAL_V(?:12|13)\|/.test(k)) remove.push(k);
       }
       remove.forEach(k=>localStorage.removeItem(k));
     }catch(_){ }
@@ -5463,39 +5466,25 @@ function renderOracleModalidades(){
 
   function currentMod(){return MODS.find(m=>m.id===state.modality)||MODS[0];}
   function getBicho(n){return E.bicho(E.groupFromTail(String(n).padStart(4,'0').slice(-2)));}
-  function contextKey(){
-    return state.mode==='dia'
-      ? `DIA|${state.lottery.api}|PORTFOLIO`
-      : `SORTEIO|${state.lottery.api}|${state.time}|PORTFOLIO`;
-  }
+  function contextKey(){return state.mode==='dia'?`DIA|${state.lottery.api}|PORTFOLIO`:`SORTEIO|${state.lottery.api}|${state.time}|PORTFOLIO`;}
   function snapshotKey(){return `${NS}${today()}|${contextKey()}`;}
   function superKey(){return `${NS}${today()}|SUPER|${state.superType}`;}
   function loadSnapshot(key){try{const raw=localStorage.getItem(key);return raw?JSON.parse(raw):null;}catch(_){return null;}}
-  function saveSnapshot(key,data){try{localStorage.setItem(key,JSON.stringify(data));}catch(_){}}
-
-  function syncLegacyState(){
-    try{
-      if(typeof oracleCurrentLottery!=='undefined') oracleCurrentLottery=state.lottery;
-      if(typeof oracleCurrentHorario!=='undefined') oracleCurrentHorario=state.time;
-      if(typeof oracleCurrentSubModo!=='undefined') oracleCurrentSubModo=state.mode;
-      if(typeof oracleCurrentModalidade!=='undefined') oracleCurrentModalidade=MODS.find(m=>m.id===state.modality)||oracleCurrentModalidade;
-      if(typeof oraclePickType!=='undefined') oraclePickType=state.modality;
-      if(typeof oracleSuperType!=='undefined') oracleSuperType=state.superType;
-    }catch(_){ }
-  }
+  function saveSnapshot(key,data){try{localStorage.setItem(key,JSON.stringify(data));}catch(_){} }
 
   function renderLotteryList(){
     const host=document.getElementById('oracleLotteryList');if(!host)return;
-    host.innerHTML=LOTTERIES.map(l=>`<button class="lottery-btn ${l.api===state.lottery.api?'active':''}" onclick="window.oraculoV11SelectLottery('${l.id}')">${esc(l.name)}</button>`).join('');
+    host.innerHTML=LOTTERIES.map(l=>`<button class="lottery-btn ${l.api===state.lottery.api?'active':''}" onclick="window.oraculoV14SelectLottery('${l.id}')">${esc(l.name)}</button>`).join('');
   }
   function renderHours(){
     const host=document.getElementById('oracleHorarioList'),wrap=document.getElementById('oracleContainerHorarios');
-    if(!host||!wrap)return; wrap.style.display=state.mode==='sorteio'?'block':'none';
-    host.innerHTML=state.lottery.times.map(t=>`<button class="horario-btn ${t===state.time?'active':''}" onclick="window.oraculoV11SelectTime('${t}')">${t}</button>`).join('');
+    if(!host||!wrap)return;
+    wrap.style.display=state.mode==='sorteio'?'block':'none';
+    host.innerHTML=state.lottery.times.map(t=>`<button class="horario-btn ${t===state.time?'active':''}" onclick="window.oraculoV14SelectTime('${t}')">${t}</button>`).join('');
   }
   function renderModalities(){
     const host=document.getElementById('oracleModalidadeList');if(!host)return;
-    host.innerHTML=MODS.map(m=>`<button class="modalidade-btn ${m.id===state.modality?'active':''}" onclick="window.oraculoV11SelectModality('${m.id}')"><span>${esc(m.nome)}</span><strong>${m.mult}</strong></button>`).join('');
+    host.innerHTML=MODS.map(m=>`<button class="modalidade-btn ${m.id===state.modality?'active':''}" onclick="window.oraculoV14SelectModality('${m.id}')"><span>${esc(m.nome)}</span><strong>${m.mult}</strong></button>`).join('');
   }
   function syncModeButtons(){
     document.getElementById('btnOracleModePorLoteria')?.classList.toggle('active',true);
@@ -5509,53 +5498,40 @@ function renderOracleModalidades(){
     const h=Math.floor(ms/3600000).toString().padStart(2,'0'),m=Math.floor(ms/60000%60).toString().padStart(2,'0'),s=Math.floor(ms/1000%60).toString().padStart(2,'0');
     el.textContent=`${h}:${m}:${s}`;
     const t=today();
-    if(state.lastDate&&state.lastDate!==t){
-      state.cache.clear(); state.request++; state.busy=false;
-      if(state.mode==='dia') setTimeout(computeNormal,50);
-      else if(state.mode==='super' || document.getElementById('oracleViewSuperPalpitao')?.style.display!=='none') setTimeout(computeSuper,50);
-    }
+    if(state.lastDate&&state.lastDate!==t){state.cache.clear();state.request++;state.busy=false;setTimeout(()=>{if(document.getElementById('oracleViewSuperPalpitao')?.style.display!=='none')computeSuper();else computeNormal();},80);}
     state.lastDate=t;
   }
-  function engineMessage(text,good=true){
-    const card=document.getElementById('oracleEngineCard');if(card)card.classList.toggle('engine-waiting',!good);
-    setText('oracleEngineText',text);
-  }
+  function engineMessage(text,good=true){const card=document.getElementById('oracleEngineCard');if(card)card.classList.toggle('engine-waiting',!good);setText('oracleEngineText',text);}
 
-  function renderPrediction(modality,result,stats){
-    const vals=result?.values||[];
+  function renderPrediction(result,stats){
+    const values=arr(result?.values);
+    const kind=result?.kind==='groups'?'groups':'numbers';
     let value='----',bichoText='—';
-    if(result?.kind==='groups'){
-      value=vals.map(g=>`Grupo ${String(g).padStart(2,'0')}`).join(' · ');
-      bichoText=vals.map(g=>`🐾 ${E.bicho(Number(g)).name} · Grupo ${String(g).padStart(2,'0')}`).join(' · ');
+    if(kind==='groups'){
+      value=values.map(g=>`Grupo ${String(g).padStart(2,'0')}`).join(' · ');
+      bichoText=values.map(g=>`🐾 ${E.bicho(Number(g)).name} · Grupo ${String(g).padStart(2,'0')}`).join(' · ');
     }else{
-      value=vals.join(' · ');
-      bichoText=vals.length?vals.slice(0,6).map(n=>{const b=getBicho(n);return `🐾 ${b.name} · Grupo ${String(b.group).padStart(2,'0')}`;}).join(' · '):'—';
-      if(vals.length>6)bichoText+=' · …';
+      value=values.map(String).join(' · ');
+      bichoText=values.length?values.slice(0,6).map(n=>{const b=getBicho(n);return `🐾 ${b.name} · Grupo ${String(b.group).padStart(2,'0')}`;}).join(' · '):'—';
+      if(values.length>6)bichoText+=' · …';
     }
     setText('oraclePalpiteResult',value);
     setText('oracleBichoResult',bichoText);
-    const count=stats?.ordered?.length||0;
-    const label=state.mode==='dia'?'Sorte do Dia':`Sorteio ${state.time}`;
-    setText('oracleSelectedInfo',`${state.lottery.name} · ${label} · ${currentMod().nome}`);
-    setText('oraclePickStatus',`Análise concluída com ${count} resultados anteriores.`);
+    setText('oracleSelectedInfo',`${state.lottery.name} · ${state.mode==='dia'?'Sorte do Dia':`Sorteio ${state.time}`} · ${currentMod().nome}`);
+    setText('oraclePickStatus',`Análise concluída com ${stats?.ordered?.length||0} resultados anteriores.`);
     engineMessage('✨ Oráculo em sintonia.');
   }
-
-  function showWaiting(message){
-    setText('oraclePalpiteResult','----');setText('oracleBichoResult',message||'Aguardando dados.');
-    engineMessage('⏳ Aguardando o sorteio anterior.');
-  }
+  function showWaiting(message){setText('oraclePalpiteResult','----');setText('oracleBichoResult',message||'Aguardando dados.');engineMessage('⏳ Aguardando o sorteio anterior.');}
 
   async function computeNormal(){
-    if(state.busy)return; state.busy=true; const req=++state.request; syncLegacyState();
-    const date=today(),lottery=state.lottery.api,mode=state.mode,time=state.time;
-    const key=snapshotKey();
+    if(state.busy)return;
+    state.busy=true;const req=++state.request;const date=today(),lottery=state.lottery.api,time=state.time,key=snapshotKey();
     const existing=loadSnapshot(key);
-    if(existing?.portfolio){renderPrediction(state.modality,existing.portfolio[state.modality],existing.stats);state.busy=false;return;}
+    if(existing?.portfolio && existing.portfolio[state.modality]){renderPrediction(existing.portfolio[state.modality],existing.stats);state.busy=false;return;}
     setText('oraclePalpiteResult','••••');setText('oracleBichoResult','🔮 Consultando resultados pela rede...');engineMessage('🔮 Analisando histórico disponível...',false);
     try{
       let rows=[],previousRows=[],special=null;
-      if(mode==='dia'){
+      if(state.mode==='dia'){
         rows=await fetchHistory(lottery,dateOffset(date,-2),dateOffset(date,-1));
       }else{
         rows=await fetchHistory(lottery,dateOffset(date,-10),date);
@@ -5571,23 +5547,10 @@ function renderOracleModalidades(){
       if(req!==state.request)return;
       if(rows.length<20)throw new Error(`A rede retornou poucos dados para uma análise confiável (${rows.length} resultados).`);
       const stats=E.buildStats(rows,date);
-      let avoid={};
-      if(mode==='sorteio'){
-        // Mantém Por Sorteio diferente da carteira da Sorte do Dia.
-        try{
-          const dailyRows=await fetchHistory(lottery,dateOffset(date,-2),dateOffset(date,-1));
-          if(dailyRows.length>=20){
-            const dailyStats=E.buildStats(dailyRows,date);
-            const daily=E.buildPortfolio(dailyStats,`DAILY|${lottery}`,{previousRows:[]},{});
-            avoid=daily;
-          }
-        }catch(_){ }
-      }
       const options={previousRows,previousDraw:previousRows[0]||null,specialSignal:special};
-      const portfolio=E.buildPortfolio(stats,`${mode}|${lottery}|${time}`,options,avoid||{});
-      const snapshot={portfolio,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString(),cutoff:mode==='dia'?'00:00':`${date}T${time}:00-03:00`};
-      saveSnapshot(key,snapshot);
-      renderPrediction(state.modality,portfolio[state.modality],snapshot.stats);
+      const portfolio=E.buildPortfolio(stats,`${state.mode}|${lottery}|${time}`,options,{});
+      const snapshot={portfolio,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString(),cutoff:state.mode==='dia'?'00:00':`${date}T${time}:00-03:00`};
+      saveSnapshot(key,snapshot);renderPrediction(portfolio[state.modality],snapshot.stats);
     }catch(err){
       if(req!==state.request)return;
       setText('oraclePalpiteResult','----');setText('oracleBichoResult',err.message||'Não foi possível calcular.');engineMessage('🔮 Não foi possível concluir a análise agora.',false);
@@ -5595,26 +5558,25 @@ function renderOracleModalidades(){
   }
 
   async function computeSuper(){
-    if(state.busy)return;state.busy=true;const req=++state.request;syncLegacyState();
-    const date=today(),type=state.superType,key=superKey(),existing=loadSnapshot(key);
+    if(state.busy)return;
+    state.busy=true;const req=++state.request,date=today(),type=state.superType,key=superKey(),existing=loadSnapshot(key);
     if(existing?.result){renderSuperResult(existing);state.busy=false;return;}
     setText('oracleSuperPalpiteResult','••••');setText('oracleSuperDescription','✨ Analisando as quatro fontes de resultados...');setHTML('oracleSuperGridContainer','');engineMessage('✨ Oráculo em sintonia.');
     try{
-      const start=dateOffset(date,-7);const lists=await Promise.all(LOTTERIES.map(l=>fetchHistory(l.api,start,dateOffset(date,-1))));
+      const start=dateOffset(date,-7),lists=await Promise.all(LOTTERIES.map(l=>fetchHistory(l.api,start,dateOffset(date,-1))));
       if(req!==state.request)return;
       const rows=lists.flat();if(rows.length<40)throw new Error(`Histórico cruzado insuficiente (${rows.length} resultados).`);
-      const stats=E.buildStats(rows,date);const length=type==='milhar'?4:3,qty=type==='milhar'?100:50;
-      const ranked=E.rankCandidates(length,stats,{previousRows:[]},`SUPER|${date}|${type}`,10000);
-      const out=[],seen=new Set();
+      const stats=E.buildStats(rows,date),length=type==='milhar'?4:3,qty=type==='milhar'?100:50;
+      const ranked=E.rankCandidates(length,stats,{previousRows:[]},`SUPER|${date}|${type}`,10000),out=[],seen=new Set();
       for(const c of ranked){if(out.length>=qty)break;const g=E.groupFromTail(c.number.slice(-2));if(!seen.has(g)){out.push(c.number);seen.add(g);}}
       for(const c of ranked){if(out.length>=qty)break;if(!out.includes(c.number))out.push(c.number);}
-      const result={kind:'numbers',values:out.slice(0,qty)};
-      const snap={result,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString()};saveSnapshot(key,snap);renderSuperResult(snap);
+      const snap={result:{kind:'numbers',values:out.slice(0,qty)},stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString()};
+      saveSnapshot(key,snap);renderSuperResult(snap);
     }catch(err){if(req!==state.request)return;setText('oracleSuperPalpiteResult','Aguardando dados');setText('oracleSuperDescription','🔮 A fonte de resultados demorou para responder.');engineMessage('🔮 Não foi possível concluir agora.',false);}finally{state.busy=false;}
   }
 
   function renderSuperResult(snapshot){
-    const type=state.superType,items=snapshot.result?.values||[];
+    const type=state.superType,items=arr(snapshot?.result?.values);
     setText('oracleSuperSelectedInfo',type==='milhar'?'100 Milhares — Super Palpitão do Dia':'50 Centenas — Super Palpitão do Dia');
     setText('oracleSuperPalpiteResult',`${items.length} combinações analisadas`);
     setText('oracleSuperDescription','✨ Carteira diária calculada com as quatro fontes de resultados.');
@@ -5636,24 +5598,22 @@ function renderOracleModalidades(){
     }catch(err){setText('oracleStatus',`Não foi possível consultar: ${err.message}`);}
   }
 
-  window.oraculoV11SelectLottery=function(id){state.request++;state.busy=false;state.lottery=LOTTERIES.find(x=>x.id===id)||LOTTERIES[0];state.time=state.lottery.times[0];syncLegacyState();renderLotteryList();renderHours();renderModalities();computeNormal();};
-  window.oraculoV11SelectTime=function(t){state.request++;state.busy=false;state.time=t;syncLegacyState();renderHours();computeNormal();};
-  window.oraculoV11SelectModality=function(m){state.request++;state.busy=false;state.modality=m;syncLegacyState();renderModalities();computeNormal();};
-  window.mudarSubModoOracle=function(mode){state.request++;state.busy=false;state.mode=mode==='sorteio'?'sorteio':'dia';syncLegacyState();syncModeButtons();renderHours();computeNormal();};
+  // Funções públicas únicas. Os controladores antigos não são usados.
+  window.oraculoV11SelectLottery=window.oraculoV14SelectLottery=function(id){state.request++;state.busy=false;state.lottery=LOTTERIES.find(x=>x.id===id)||LOTTERIES[0];state.time=state.lottery.times[0];renderLotteryList();renderHours();renderModalities();computeNormal();};
+  window.oraculoV11SelectTime=window.oraculoV14SelectTime=function(t){state.request++;state.busy=false;state.time=t;renderHours();computeNormal();};
+  window.oraculoV11SelectModality=window.oraculoV14SelectModality=function(m){state.request++;state.busy=false;state.modality=m;renderModalities();computeNormal();};
+  window.mudarSubModoOracle=function(mode){state.request++;state.busy=false;state.mode=mode==='sorteio'?'sorteio':'dia';syncModeButtons();renderHours();computeNormal();};
   window.mudarModoOracle=function(mode){
     const normal=document.getElementById('oracleViewPorLoteria'),superView=document.getElementById('oracleViewSuperPalpitao');
-    if(mode==='super'){
-      document.getElementById('btnOracleModePorLoteria')?.classList.remove('active');document.getElementById('btnOracleModeSuper')?.classList.add('active');normal.style.display='none';superView.style.display='block';state.request++;state.busy=false;computeSuper();
-    }else{
-      document.getElementById('btnOracleModePorLoteria')?.classList.add('active');document.getElementById('btnOracleModeSuper')?.classList.remove('active');normal.style.display='block';superView.style.display='none';syncModeButtons();renderHours();computeNormal();
-    }
+    if(mode==='super'){document.getElementById('btnOracleModePorLoteria')?.classList.remove('active');document.getElementById('btnOracleModeSuper')?.classList.add('active');if(normal)normal.style.display='none';if(superView)superView.style.display='block';state.request++;state.busy=false;computeSuper();}
+    else {document.getElementById('btnOracleModePorLoteria')?.classList.add('active');document.getElementById('btnOracleModeSuper')?.classList.remove('active');if(normal)normal.style.display='block';if(superView)superView.style.display='none';syncModeButtons();renderHours();computeNormal();}
   };
   window.setOracleSuperType=function(type){state.superType=type==='centena'?'centena':'milhar';document.getElementById('oracleSuperBtnMilhar')?.classList.toggle('active',state.superType==='milhar');document.getElementById('oracleSuperBtnCentena')?.classList.toggle('active',state.superType==='centena');computeSuper();};
   window.generateOraclePicks=computeNormal;
   window.loadOracleResults=loadResults;
 
   function init(){
-    purgeLegacySnapshots();
+    purgeOldSnapshots();
     const date=document.getElementById('oracleDate');if(date)date.value=today();
     renderLotteryList();renderHours();renderModalities();syncModeButtons();state.lastDate=today();
     setInterval(updateReset,1000);updateReset();
