@@ -382,6 +382,46 @@
             box-shadow: inset 0 -3px var(--gold);
         }
 
+        .panel-switch-fx {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            z-index: 9999;
+            opacity: 0;
+        }
+        .panel-switch-fx.show {
+            animation: panelFxIn .72s ease both;
+        }
+        .panel-switch-fx .fx-orb {
+            width: 92px;
+            height: 92px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            font-size: 48px;
+            background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.42), rgba(28,17,48,.9) 62%);
+            box-shadow: 0 0 36px rgba(184,108,255,.55), 0 0 80px rgba(0,220,220,.18);
+            border: 1px solid rgba(255,255,255,.22);
+            transform: scale(.65) rotate(-8deg);
+        }
+        @keyframes panelFxIn {
+            0% { opacity: 0; }
+            18% { opacity: 1; }
+            55% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+        .panel-switch-fx.show .fx-orb {
+            animation: panelFxOrb .72s cubic-bezier(.2,.8,.2,1) both;
+        }
+        @keyframes panelFxOrb {
+            0% { transform: scale(.65) rotate(-8deg); }
+            45% { transform: scale(1.08) rotate(2deg); }
+            100% { transform: scale(.92) rotate(0deg); }
+        }
+
         /* ESTILOS DO ORÁCULO - MANTENDO APENAS AS CORES ORIGINAIS DO ORÁCULO */
         #oraculoPanel {
             min-height: 70vh;
@@ -1202,6 +1242,7 @@
 
 
 <div class="app-container">
+    <div class="panel-switch-fx" id="panelSwitchFx"><div class="fx-orb" id="panelSwitchFxOrb">🔮</div></div>
     <div class="app-tabs" id="appTabs">
         <button class="app-tab active" id="tabMago" onclick="switchAppTab('mago')">🔮 Mago</button>
         <button class="app-tab" id="tabOraculo" onclick="switchAppTab('oraculo')">✨ Oráculo</button>
@@ -3146,17 +3187,9 @@
         return String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     }
 
-    // Navegação por Gestos (Swipe)
-    let swipeStartX = 0, swipeStartY = 0;
-    document.querySelector('.app-container').addEventListener('touchstart', e => { if(e.touches.length===1){swipeStartX=e.touches[0].clientX;swipeStartY=e.touches[0].clientY;} }, {passive:true});
-    document.querySelector('.app-container').addEventListener('touchend', e => {
-        if(!swipeStartX) return;
-        const dx=e.changedTouches[0].clientX-swipeStartX, dy=e.changedTouches[0].clientY-swipeStartY;
-        if(Math.abs(dx)>85 && Math.abs(dx)>Math.abs(dy)*1.3) switchAppTab(dx<0?'oraculo':'mago');
-        swipeStartX=0; swipeStartY=0;
-    }, {passive:true});
-
     // Alternar entre Mago e Oráculo
+    // A navegação entre os dois painéis acontece SOMENTE pelo clique nos botões do topo.
+    // O swipe horizontal foi removido para que deslizar dentro de listas/loterias não troque de painel.
     function switchAppTab(tab) {
         const mago = document.getElementById('magoPanel');
         const oracle = document.getElementById('oraculoPanel');
@@ -3165,6 +3198,16 @@
         if (!mago || !oracle || !tabMago || !tabOracle) return;
 
         const showOracle = tab === 'oraculo';
+        const fx = document.getElementById('panelSwitchFx');
+        const fxOrb = document.getElementById('panelSwitchFxOrb');
+        if (fx && fxOrb) {
+            fxOrb.textContent = showOracle ? '🔮✨' : '🧙‍♂️✨';
+            fx.classList.remove('show');
+            void fx.offsetWidth;
+            fx.classList.add('show');
+            clearTimeout(window.__panelSwitchFxTimer);
+            window.__panelSwitchFxTimer = setTimeout(() => fx.classList.remove('show'), 760);
+        }
         mago.style.display = showOracle ? 'none' : 'block';
         oracle.style.display = showOracle ? 'block' : 'none';
         tabMago.classList.toggle('active', !showOracle);
