@@ -5730,5 +5730,233 @@ function renderOracleModalidades(){
   }catch(_){ }
 })();
 </script>
+
+<script id="oracle-ptsp-sorteio-fix-v17">
+/* PT-SP Por Sorteio — correção isolada.
+   Mantém todo o restante do Oráculo como está.
+   A interface usa 08:20/10:20/...; a fonte do Para Todos-SP publica
+   os mesmos sorteios como 08:00/10:00/... . Este patch traduz apenas
+   essa diferença para a checagem do sorteio anterior e para o corte temporal.
+*/
+(function(){
+  'use strict';
+  const E=window.OraculoV13;
+  if(!E) return;
+
+  const LOT={
+    id:'paratodos_sp',
+    api:'Para Todos-SP',
+    name:'Para Todos - SP',
+    times:['08:20','10:20','12:20','13:20','15:20','17:20','19:20','20:20']
+  };
+  const NS='ORACULO_PTSP_FIX_V17|';
+  const originalLottery=window.oraculoV14SelectLottery;
+  const originalTime=window.oraculoV14SelectTime;
+  const originalModality=window.oraculoV14SelectModality;
+  const originalSubMode=window.mudarSubModoOracle;
+  let selectedTime=LOT.times[0];
+  let selectedModality='milhar';
+  let busy=false;
+  let requestId=0;
+
+  function todaySP(){
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const v=Object.fromEntries(parts.map(p=>[p.type,p.value]));
+    return `${v.year}-${v.month}-${v.day}`;
+  }
+  function shiftDate(iso,n){
+    const d=new Date(`${iso}T12:00:00Z`); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10);
+  }
+  function sourceTime(uiTime){
+    const [h,m]=uiTime.split(':').map(Number);
+    let mins=h*60+m-20;
+    mins=(mins+1440)%1440;
+    return `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}`;
+  }
+  function modalityIsGroup(id){return ['grupo','duque_grupo','terno_grupo','passe_vai'].includes(id);}
+  function selectedModButton(id){
+    const host=document.getElementById('oracleModalidadeList');
+    if(!host) return;
+    host.querySelectorAll('.modalidade-btn,.item-btn').forEach(b=>b.classList.remove('active'));
+    const buttons=[...host.querySelectorAll('.modalidade-btn,.item-btn')];
+    const names={
+      milhar:'Milhar', palpitao:'Palpitão (20 Dezenas)', centena:'Centena', dezena:'Dezena',
+      grupo:'Grupo', duque_dezena:'Duque de Dezena', terno_dezena:'Terno de Dezena',
+      duque_grupo:'Duque de Grupo', terno_grupo:'Terno de Grupo', passe_vai:'Passe Vai'
+    };
+    const target=buttons.find(b=>String(b.textContent||'').trim().startsWith(names[id]||id));
+    if(target) target.classList.add('active');
+  }
+  function renderHours(){
+    const wrap=document.getElementById('oracleContainerHorarios');
+    const host=document.getElementById('oracleHorarioList');
+    if(!wrap||!host) return;
+    wrap.style.display='block';
+    host.innerHTML=LOT.times.map(t=>`<button class="horario-btn ${t===selectedTime?'active':''}" onclick="window.oraculoV14SelectTime('${t}')">${t}</button>`).join('');
+  }
+  function setLotteryButtonActive(){
+    document.querySelectorAll('#oracleLotteryList .lottery-btn').forEach(b=>{
+      b.classList.toggle('active',String(b.textContent||'').trim()==='Para Todos - SP');
+    });
+  }
+  function syncPublicLegacyState(){
+    try{
+      window.oracleCurrentLottery={id:'paratodos_sp',nome:LOT.name,horarios:LOT.times.slice()};
+      window.oracleCurrentHorario=selectedTime;
+      window.oracleCurrentSubModo='sorteio';
+      window.oracleCurrentModalidade={id:selectedModality,nome:selectedModality};
+      window.oraclePickType=selectedModality;
+    }catch(_){ }
+  }
+  function contextKey(date){return `${NS}${date}|${LOT.api}|SORTEIO|${selectedTime}|PORTFOLIO`;}
+  function loadSnapshot(key){try{const r=localStorage.getItem(key);return r?JSON.parse(r):null;}catch(_){return null;}}
+  function saveSnapshot(key,v){try{localStorage.setItem(key,JSON.stringify(v));}catch(_){}}
+  async function fetchHistory(start,end){
+    const base=(location.protocol==='http:'||location.protocol==='https:')&&location.hostname?location.origin:'https://oraculo-backend-mor3.onrender.com';
+    const qs=new URLSearchParams({lottery:LOT.api,start_date:start,end_date:end});
+    const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),90000);
+    try{
+      const res=await fetch(`${base}/api/oracle/history?${qs}`,{headers:{Accept:'application/json'},cache:'no-store',signal:controller.signal});
+      let data={}; try{data=await res.json();}catch(_){ }
+      if(!res.ok) throw new Error(data?.detail?.message||data?.detail||data?.error||`HTTP ${res.status}`);
+      return E.normalizeRows(data.rows||[]);
+    }catch(e){
+      if(e.name==='AbortError') throw new Error('A fonte do Para Todos-SP demorou para responder.');
+      throw e;
+    }finally{clearTimeout(timer);}
+  }
+  function rowsAt(rows,date,time,tolMinutes=2){
+    const target=Number(time.slice(0,2))*60+Number(time.slice(3));
+    return rows.filter(r=>{
+      if(r.date!==date) return false;
+      const m=String(r.time||'').match(/^(\d{2}):(\d{2})$/); if(!m) return false;
+      const actual=Number(m[1])*60+Number(m[2]);
+      return Math.abs(actual-target)<=tolMinutes;
+    }).sort((a,b)=>a.prize-b.prize);
+  }
+  function setResultTitle(){
+    const names={
+      milhar:'Milhar', palpitao:'Palpitão (20 Dezenas)', centena:'Centena', dezena:'Dezena',
+      grupo:'Grupo', duque_dezena:'Duque de Dezena', terno_dezena:'Terno de Dezena',
+      duque_grupo:'Duque de Grupo', terno_grupo:'Terno de Grupo', passe_vai:'Passe Vai'
+    };
+    const el=document.getElementById('oracleSelectedInfo');
+    if(el) el.textContent=`${LOT.name} · Sorteio ${selectedTime} · ${names[selectedModality]||selectedModality}`;
+  }
+  function render(result,stats){
+    const values=Array.isArray(result)?result:(result?.values||[]);
+    const kind=modalityIsGroup(selectedModality)?'groups':'numbers';
+    let value='----',bicho='—';
+    if(kind==='groups'){
+      value=values.map(g=>`Grupo ${String(g).padStart(2,'0')}`).join(' · ');
+      bicho=values.map(g=>{const b=E.bicho(Number(g));return `🐾 ${b.name} · Grupo ${String(g).padStart(2,'0')}`;}).join(' · ');
+    }else{
+      value=values.map(String).join(' · ');
+      bicho=values.length?values.slice(0,6).map(n=>{const b=E.bicho(E.groupFromTail(String(n).padStart(4,'0').slice(-2)));return `🐾 ${b.name} · Grupo ${String(b.group).padStart(2,'0')}`;}).join(' · '):'—';
+      if(values.length>6) bicho+=' · …';
+    }
+    const p=document.getElementById('oraclePalpiteResult'); if(p) p.textContent=value;
+    const bi=document.getElementById('oracleBichoResult'); if(bi) bi.textContent=bicho;
+    setResultTitle();
+    const st=document.getElementById('oraclePickStatus'); if(st) st.textContent=`Análise concluída com ${stats?.ordered?.length||0} resultados anteriores.`;
+    const eng=document.getElementById('oracleEngineText'); if(eng) eng.textContent='✨ Oráculo em sintonia.';
+    const card=document.getElementById('oracleEngineCard'); if(card) card.classList.remove('engine-waiting');
+  }
+  function waiting(text){
+    setResultTitle();
+    const p=document.getElementById('oraclePalpiteResult'); if(p) p.textContent='----';
+    const bi=document.getElementById('oracleBichoResult'); if(bi) bi.textContent=text;
+    const st=document.getElementById('oraclePickStatus'); if(st) st.textContent=text;
+    const eng=document.getElementById('oracleEngineText'); if(eng) eng.textContent='⏳ Aguardando o sorteio anterior.';
+    const card=document.getElementById('oracleEngineCard'); if(card) card.classList.add('engine-waiting');
+  }
+  async function compute(){
+    if(busy) return;
+    busy=true; const rid=++requestId; const date=todaySP(); const targetSourceTime=sourceTime(selectedTime);
+    const key=contextKey(date);
+    try{
+      const cached=loadSnapshot(key);
+      if(cached?.portfolio?.[selectedModality]){ render(cached.portfolio[selectedModality],cached.stats||{}); return; }
+      setResultTitle();
+      const p=document.getElementById('oraclePalpiteResult'); if(p) p.textContent='••••';
+      const bi=document.getElementById('oracleBichoResult'); if(bi) bi.textContent='🔮 Consultando os resultados do Para Todos-SP...';
+      const eng=document.getElementById('oracleEngineText'); if(eng) eng.textContent='🔮 Analisando histórico disponível...';
+      const allRows=await fetchHistory(shiftDate(date,-10),date);
+      if(rid!==requestId) return;
+
+      const targetRows=rowsAt(allRows,date,targetSourceTime);
+      if(targetRows.some(r=>Number(r.prize)===1)){
+        waiting('O sorteio alvo já possui resultado; não é permitida previsão retroativa.');
+        return;
+      }
+      const idx=LOT.times.indexOf(selectedTime);
+      const prevTimeUI=idx>0?LOT.times[idx-1]:LOT.times[LOT.times.length-1];
+      const prevDate=idx>0?date:shiftDate(date,-1);
+      const prevSource=sourceTime(prevTimeUI);
+      const previousRows=rowsAt(allRows,prevDate,prevSource);
+      if(!previousRows.length){
+        waiting(`Aguardando o resultado do sorteio imediatamente anterior (${prevTimeUI}).`);
+        return;
+      }
+      const rows=allRows.filter(r=>r.date<date||(r.date===date&&String(r.time||'')<targetSourceTime));
+      if(rows.length<20) throw new Error(`Histórico insuficiente para o Para Todos-SP (${rows.length} resultados).`);
+      const stats=E.buildStats(rows,date);
+      const portfolio=E.buildPortfolio(stats,`PTSP|SORTEIO|${selectedTime}|${date}`,{previousRows,previousDraw:previousRows[0]||null,specialSignal:null},{});
+      const snap={portfolio,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString(),displayTime:selectedTime,sourceTime:targetSourceTime,previousSourceTime:prevSource,sourceLottery:LOT.api};
+      saveSnapshot(key,snap);
+      if(rid!==requestId)return;
+      render(portfolio[selectedModality],snap.stats);
+    }catch(e){
+      if(rid!==requestId)return;
+      const p=document.getElementById('oraclePalpiteResult'); if(p) p.textContent='----';
+      const bi=document.getElementById('oracleBichoResult'); if(bi) bi.textContent=e.message||'Não foi possível calcular o palpite.';
+      const eng=document.getElementById('oracleEngineText'); if(eng) eng.textContent='🔮 Não foi possível concluir a análise agora.';
+    }finally{busy=false;}
+  }
+
+  function handleLottery(){
+    const activeHour=document.querySelector('#oracleHorarioList .horario-btn.active');
+    const activeText=String(activeHour?.textContent||'').trim();
+    if(LOT.times.includes(activeText)) selectedTime=activeText;
+    else if(!LOT.times.includes(selectedTime)) selectedTime=LOT.times[0];
+    setLotteryButtonActive(); renderHours(); selectedModality=selectedModality||'milhar'; selectedModButton(selectedModality); syncPublicLegacyState(); compute();
+  }
+  function handleTime(t){
+    if(!LOT.times.includes(t)) return;
+    selectedTime=t; stateHack(); renderHours(); setLotteryButtonActive(); syncPublicLegacyState(); compute();
+  }
+  function handleModality(m){
+    selectedModality=m; stateHack(); selectedModButton(m); setLotteryButtonActive(); syncPublicLegacyState(); compute();
+  }
+  function stateHack(){try{window.oracleCurrentHorario=selectedTime;window.oracleCurrentLottery={id:'paratodos_sp',nome:LOT.name,horarios:LOT.times.slice()};window.oracleCurrentSubModo='sorteio';}catch(_){}}
+  function isSort(){return document.getElementById('btnOracleSubPorSorteio')?.classList.contains('active');}
+  function activeLotteryIsPTSP(){
+    const b=[...document.querySelectorAll('#oracleLotteryList .lottery-btn')].find(x=>String(x.textContent||'').trim()==='Para Todos - SP');
+    return !!b?.classList.contains('active');
+  }
+
+  window.oraculoV14SelectLottery=function(id){
+    if(id==='paratodos_sp' && isSort()){ handleLottery(); return; }
+    return originalLottery?.(id);
+  };
+  window.oraculoV14SelectTime=function(t){
+    if(activeLotteryIsPTSP() && isSort() && LOT.times.includes(t)){handleTime(t);return;}
+    return originalTime?.(t);
+  };
+  window.oraculoV14SelectModality=function(m){
+    if(activeLotteryIsPTSP() && isSort()){handleModality(m);return;}
+    return originalModality?.(m);
+  };
+  window.mudarSubModoOracle=function(mode){
+    if(mode==='sorteio' && activeLotteryIsPTSP()){
+      document.getElementById('btnOracleSubSorteDia')?.classList.remove('active');
+      document.getElementById('btnOracleSubPorSorteio')?.classList.add('active');
+      selectedTime=LOT.times.includes(selectedTime)?selectedTime:LOT.times[0];
+      setLotteryButtonActive();renderHours();selectedModButton(selectedModality);syncPublicLegacyState();compute();return;
+    }
+    return originalSubMode?.(mode);
+  };
+})();
+</script>
 </body>
 </html>
