@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: oraculo-results-bridge
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: SOURCE_URL
+        value: https://www.ojogodobicho.com/deu_no_poste.html
+      - key: ALLOWED_SOURCE_HOSTS
+        value: www.ojogodobicho.com,ojogodobicho.com,www.resultadofacil.com.br,resultadofacil.com.br
+      - key: CACHE_TTL_SECONDS
+        value: "180"
+      - key: ORACLE_RESULTS_TTL_SECONDS
+        value: "180"
