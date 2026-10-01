@@ -5504,8 +5504,13 @@ function renderOracleModalidades(){
   function engineMessage(text,good=true){const card=document.getElementById('oracleEngineCard');if(card)card.classList.toggle('engine-waiting',!good);setText('oracleEngineText',text);}
 
   function renderPrediction(result,stats){
-    const values=arr(result?.values);
-    const kind=result?.kind==='groups'?'groups':'numbers';
+    // Aceita tanto o formato {kind, values} quanto o array cru salvo no portfolio.
+    // Isso evita que Array.prototype.values (função nativa) apareça na interface.
+    const rawValues=Array.isArray(result) ? result : result?.values;
+    const values=arr(rawValues).filter(v=>v!==undefined&&v!==null&&v!=='');
+    const kind=Array.isArray(result)
+      ? (['grupo','duque_grupo','terno_grupo','passe_vai'].includes(state.modality)?'groups':'numbers')
+      : (result?.kind==='groups'?'groups':'numbers');
     let value='----',bichoText='—';
     if(kind==='groups'){
       value=values.map(g=>`Grupo ${String(g).padStart(2,'0')}`).join(' · ');
@@ -5527,7 +5532,11 @@ function renderOracleModalidades(){
     if(state.busy)return;
     state.busy=true;const req=++state.request;const date=today(),lottery=state.lottery.api,time=state.time,key=snapshotKey();
     const existing=loadSnapshot(key);
-    if(existing?.portfolio && existing.portfolio[state.modality]){renderPrediction(existing.portfolio[state.modality],existing.stats);state.busy=false;return;}
+    if(existing?.portfolio && existing.portfolio[state.modality]){
+      const cached=existing.portfolio[state.modality];
+      renderPrediction({kind:['grupo','duque_grupo','terno_grupo','passe_vai'].includes(state.modality)?'groups':'numbers',values:cached},existing.stats);
+      state.busy=false;return;
+    }
     setText('oraclePalpiteResult','••••');setText('oracleBichoResult','🔮 Consultando resultados pela rede...');engineMessage('🔮 Analisando histórico disponível...',false);
     try{
       let rows=[],previousRows=[],special=null;
@@ -5550,7 +5559,8 @@ function renderOracleModalidades(){
       const options={previousRows,previousDraw:previousRows[0]||null,specialSignal:special};
       const portfolio=E.buildPortfolio(stats,`${state.mode}|${lottery}|${time}`,options,{});
       const snapshot={portfolio,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString(),cutoff:state.mode==='dia'?'00:00':`${date}T${time}:00-03:00`};
-      saveSnapshot(key,snapshot);renderPrediction(portfolio[state.modality],snapshot.stats);
+      saveSnapshot(key,snapshot);
+      renderPrediction({kind:['grupo','duque_grupo','terno_grupo','passe_vai'].includes(state.modality)?'groups':'numbers',values:portfolio[state.modality]},snapshot.stats);
     }catch(err){
       if(req!==state.request)return;
       setText('oraclePalpiteResult','----');setText('oracleBichoResult',err.message||'Não foi possível calcular.');engineMessage('🔮 Não foi possível concluir a análise agora.',false);
@@ -5624,5 +5634,17 @@ function renderOracleModalidades(){
 </script>
 
 
+<script id="oraculo-v15-defensive-fix">
+(function(){
+  'use strict';
+  // V15: limpeza defensiva de snapshots legados da mesma sessão e helpers seguros.
+  try{
+    for(let i=localStorage.length-1;i>=0;i--){
+      const k=localStorage.key(i)||'';
+      if(/ORACULO_FINAL_V(?:11|12|13)\|/.test(k)) localStorage.removeItem(k);
+    }
+  }catch(_){ }
+})();
+</script>
 </body>
 </html>
