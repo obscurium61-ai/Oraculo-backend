@@ -4652,53 +4652,14 @@ function renderOracleModalidades(){
     oraclePickType='milhar';
 }
 
-    /* Inicialização ao carregar a página */
+    /* Inicialização ao carregar a página: Mago é preservado.
+       O Oráculo é inicializado exclusivamente pelo controlador V12 abaixo,
+       evitando dois geradores concorrentes e resultados antigos competindo entre si. */
     window.onload = () => {
-        // V15: ignore snapshots de versões antigas; a namespace atual é ORACULO_V15.
-        try{
-            for(let i=localStorage.length-1;i>=0;i--){
-                const k=localStorage.key(i);
-                if(k && (k.startsWith('ORACULO_V8|') || k.startsWith('ORACULO_V11_SNAPSHOT|') || k.startsWith('ORACULO_V13|') || k.startsWith('ORACULO_V14|') || k.startsWith('ORACULO_V15|') || k.startsWith('ORACULO_V15_SNAPSHOT|'))) localStorage.removeItem(k);
-            }
-        }catch(_){}
-        // Inicializa Mago
         renderLoterias();
         renderModalidades();
         atualizarPalpite();
         iniciarTimerReset();
-
-        // Inicializa Oráculo no novo padrão
-        renderOracleLoterias();
-        renderOracleModalidades();
-        document.getElementById('oracleDate').value = oracleTodayISO();
-        updateOracleCycleLabel();
-        oracleActiveCycle = oracleCycleId(ORACLE_MAP[oracleCurrentLottery.id] || "PT-RIO");
-
-        // Cronômetro do Oráculo, no mesmo formato visual do Mago.
-        updateOracleResetTimer();
-        setInterval(updateOracleResetTimer, 1000);
-
-        // Polling para checar troca de ciclo no Oráculo
-        setInterval(() => {
-            const currentCycle = oracleCycleId(ORACLE_MAP[oracleCurrentLottery.id] || "PT-RIO");
-            if (currentCycle !== oracleActiveCycle) {
-                oracleActiveCycle = currentCycle;
-                // O histórico agregado do Super também precisa ser renovado após a meia-noite.
-                oracleSuperHistoryPromise = null;
-                oracleSuperHistoryCycle = currentCycle;
-                oracleSuperHistoryBucket = -1;
-                updateOracleCycleLabel();
-                generateOraclePicks();
-            }
-        }, 15000);
-        // Atualiza histórico por minuto para incorporar resultados recém-publicados sem fechar o app.
-        setInterval(()=>{
-            if(document.getElementById('oraculoPanel').style.display!=='none'){
-                oracleSuperHistoryPromise=null;
-                oracleSuperHistoryBucket=-1;
-                generateOraclePicks();
-            }
-        },60000);
     };
 </script>
 
@@ -4788,14 +4749,126 @@ function renderOracleModalidades(){
 </style>
 
 
-<style id="oraculo-v11-definitive-style">
+
+<style id="oraculo-v12-polish">
+#oraculoPanel .modalidade-list{
+  max-height:430px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  padding:2px 2px 6px 0;
+  scrollbar-width:thin;
+  scrollbar-color:#6b2aa8 #121b22;
+}
+#oraculoPanel .modalidade-list::-webkit-scrollbar{width:7px}
+#oraculoPanel .modalidade-list::-webkit-scrollbar-track{background:#101820;border-radius:10px}
+#oraculoPanel .modalidade-list::-webkit-scrollbar-thumb{background:#6b2aa8;border-radius:10px}
+#oraculoPanel .modalidade-btn{
+  appearance:none;
+  -webkit-appearance:none;
+  width:100%;
+  min-height:62px;
+  box-sizing:border-box;
+  border:1px solid #294654;
+  border-radius:17px;
+  padding:14px 16px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  background:linear-gradient(180deg,#182934 0%,#13212a 100%);
+  color:#eaf4ff;
+  font:inherit;
+  font-size:1.02rem;
+  text-align:left;
+  cursor:pointer;
+  transition:transform .16s ease,background .16s ease,border-color .16s ease,box-shadow .16s ease;
+}
+#oraculoPanel .modalidade-btn span{min-width:0;line-height:1.2}
+#oraculoPanel .modalidade-btn strong{
+  flex:0 0 auto;
+  background:#0e1820;
+  border-radius:999px;
+  padding:7px 11px;
+  color:#ffe000;
+  font-size:.82rem;
+  font-weight:800;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);
+}
+#oraculoPanel .modalidade-btn.active{
+  background:linear-gradient(180deg,#0d9aa2 0%,#087f8c 100%);
+  border-color:#7fe7e4;
+  box-shadow:0 8px 22px rgba(0,166,166,.18);
+}
+#oraculoPanel .modalidade-btn.active strong{background:rgba(0,0,0,.28);color:#fff000}
+#oraculoPanel .modalidade-btn:active{transform:scale(.988)}
+
+#oraculoPanel .oracle-engine-card{
+  display:flex;
+  align-items:center;
+  gap:16px;
+  min-height:112px;
+  padding:18px 20px;
+  background:radial-gradient(circle at 17% 50%,rgba(0,205,200,.13),transparent 28%),linear-gradient(135deg,#132a2e 0%,#121724 72%);
+  border:1px solid #2a5961;
+  border-radius:22px;
+  box-shadow:inset 0 0 28px rgba(0,180,180,.05);
+}
+#oraculoPanel .oracle-engine-copy{min-width:0;flex:1}
+#oraculoPanel .oracle-engine-title{font-weight:800;letter-spacing:.5px;color:#7fe7e4;margin-bottom:7px}
+#oraculoPanel .oracle-engine-text{font-size:.93rem;line-height:1.35;color:#cad8e2;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#oraculoPanel .oracle-engine-scan{margin-top:9px}
+
+#oraculoPanel .super-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:9px;
+}
+#oraculoPanel .super-card{
+  min-height:54px;
+  padding:10px 12px;
+  border-radius:13px;
+  border:1px solid #294654;
+  background:linear-gradient(180deg,#182934 0%,#13212a 100%);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+}
+#oraculoPanel .super-card .num{font-weight:900;color:#ffe000;font-size:1.05rem;letter-spacing:.3px}
+#oraculoPanel .super-card .bicho{color:#b8c8d4;font-size:.72rem;text-align:right;white-space:nowrap}
+
+#oraculoPanel .oracle-result-line{
+  display:grid;
+  grid-template-columns:40px 80px minmax(0,1fr);
+  align-items:center;
+  column-gap:12px;
+  min-height:38px;
+  padding:7px 2px;
+  border-bottom:1px solid #263b46;
+}
+#oraculoPanel .oracle-result-line:last-child{border-bottom:0}
+#oraculoPanel .oracle-result-line .place{text-align:left;color:#b7cbd5}
+#oraculoPanel .oracle-result-line .result-number{text-align:center;letter-spacing:.5px;color:#eef6ff}
+#oraculoPanel .oracle-result-line .result-bicho{text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dfe9ef}
+
+@media (max-width:430px){
+  #oraculoPanel .modalidade-btn{min-height:58px;padding:12px 14px;font-size:.98rem}
+  #oraculoPanel .modalidade-btn strong{font-size:.76rem;padding:6px 9px}
+  #oraculoPanel .oracle-engine-card{padding:16px}
+  #oraculoPanel .oracle-engine-text{font-size:.88rem}
+}
+</style>
+<style id="oraculo-v12-definitive-style">
 #oraculoPanel .palpite-long{font-size:.92rem;line-height:1.75;word-break:break-word;}
 #oraculoPanel .oracle-result-line .result-bicho{font-size:.98rem;}
 #oraculoPanel .super-card .bicho{font-size:.72rem;opacity:.9;}
 #oraculoPanel .oracle-engine-card.engine-waiting{opacity:.95;}
 </style>
-<script id="oraculo-v11-engine">
-/* Oráculo V11 — motor estatístico stateless, executado no navegador.
+<script id="oraculo-v12-engine">
+/* Oráculo V12 — motor estatístico stateless, executado no navegador.
    Não usa banco de aprendizado. Recebe resultados pela rede e calcula localmente.
 */
 (function(root){
@@ -5103,21 +5176,21 @@ function renderOracleModalidades(){
 
   function shiftDate(iso,days){ const d=new Date(iso+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()+days); return d.toISOString().slice(0,10); }
 
-  function freezeKey(target){ return `ORACULO_FINAL_V11|${target}`; }
+  function freezeKey(target){ return `ORACULO_FINAL_V12|${target}`; }
   function saveFrozen(target,data){ try{localStorage.setItem(freezeKey(target),JSON.stringify(data));}catch(_){ } }
   function loadFrozen(target){ try{const raw=localStorage.getItem(freezeKey(target));return raw?JSON.parse(raw):null;}catch(_){return null;} }
 
-  root.OraculoV11={GROUPS,groupFromTail,bicho,dayCalendar,viradinha,normalizeRows,buildStats,rankCandidates,rankGroups,buildPrediction,specialNationalSignal,readiness,shiftDate,saveFrozen,loadFrozen,freezeKey,PROFILES};
+  root.OraculoV12={GROUPS,groupFromTail,bicho,dayCalendar,viradinha,normalizeRows,buildStats,rankCandidates,rankGroups,buildPrediction,specialNationalSignal,readiness,shiftDate,saveFrozen,loadFrozen,freezeKey,PROFILES};
 })(typeof window!=='undefined'?window:globalThis);
 
 </script>
-<script id="oraculo-v11-ui">
-/* Oráculo V11 — controlador visual.
+<script id="oraculo-v12-ui">
+/* Oráculo V12 — controlador visual.
    Mantém o layout existente e substitui o backend de previsão por cálculo local.
 */
 (function(){
   'use strict';
-  const E=window.OraculoV11;
+  const E=window.OraculoV12;
   if(!E) return;
 
   const API=(location.protocol==='http:'||location.protocol==='https:') && location.hostname ? location.origin : 'https://oraculo-backend-mor3.onrender.com';
@@ -5226,9 +5299,9 @@ function renderOracleModalidades(){
     setText('oracleEngineText',text);
   }
 
-  function snapshotKey(ctx){ return `UI|${today()}|${ctx}`; }
-  function loadSnapshot(ctx){ try{const raw=localStorage.getItem('ORACULO_V11|'+snapshotKey(ctx));return raw?JSON.parse(raw):null;}catch(_){return null;} }
-  function saveSnapshot(ctx,data){ try{localStorage.setItem('ORACULO_V11|'+snapshotKey(ctx),JSON.stringify(data));}catch(_){ } }
+  function snapshotKey(ctx){ return `V12|${today()}|${ctx}`; }
+  function loadSnapshot(ctx){ try{const raw=localStorage.getItem('ORACULO_V12|'+snapshotKey(ctx));return raw?JSON.parse(raw):null;}catch(_){return null;} }
+  function saveSnapshot(ctx,data){ try{localStorage.setItem('ORACULO_V12|'+snapshotKey(ctx),JSON.stringify(data));}catch(_){ } }
 
   function renderPrediction(modality,result,stats,ctx){
     const vals=result.values||[];
@@ -5247,7 +5320,7 @@ function renderOracleModalidades(){
     setText('oracleSelectedInfo',`${state.lottery.name} · ${modeLabel} · ${currentMod().nome}`);
     const extra=cal&&vir?`☀️ ${cal.name} · Grupo ${String(cal.group).padStart(2,'0')}  •  🔄 Viradinha ${vir.number} → ${vir.name} · Grupo ${String(vir.group).padStart(2,'0')}`:'';
     setText('oraclePickStatus',`Calculado localmente com ${count} resultados.`);
-    engineMessage(`✦ Oráculo analisou ${count} resultados pela rede. Foco estatístico: 1º prêmio e cobertura do 1º ao 5º, combinados com frequência, recência, atraso, transições, dígitos, calendário, Viradinha e bicho do momento.${extra?' '+extra:''}`);
+    engineMessage('🔮 Palpite calculado a partir do histórico disponível. Foco no 1º prêmio e cobertura do 1º ao 5º.');
     if(modality==='palpitao') document.getElementById('oraclePalpiteResult')?.classList.add('palpite-long');
     else document.getElementById('oraclePalpiteResult')?.classList.remove('palpite-long');
   }
@@ -5259,7 +5332,7 @@ function renderOracleModalidades(){
     const existing=loadSnapshot(ctx);
     if(existing){ renderPrediction(modality,existing.result,existing.stats,ctx); state.busy=false; return; }
     setText('oraclePalpiteResult','••••'); setText('oracleBichoResult','🔮 Consultando resultados pela rede...');
-    engineMessage('✨ Acordando o Oráculo e cruzando os resultados disponíveis...',false);
+    engineMessage('🔮 Cruzando os resultados e os sinais estatísticos...',false);
     try{
       let rows=[], previousDraw=null, special=null, referenceDate=date;
       if(mode==='dia'){
@@ -5316,17 +5389,29 @@ function renderOracleModalidades(){
     const date=today(), type=state.superType, key=`SUPER|${date}|${type}`; const existing=loadSnapshot(key);
     if(existing){renderSuperResult(existing);state.busy=false;return;}
     setText('oracleSuperPalpiteResult','••••');setText('oracleSuperDescription','✨ Cruzando Rio, Para Todos-SP, LOOK e Nacional com dados anteriores a hoje.');setHTML('oracleSuperGridContainer','');
-    engineMessage('✨ O Oráculo está cruzando as quatro loterias...',false);
+    engineMessage('🔮 Cruzando as quatro fontes de resultados...',false);
     try{
       const start=dateOffset(date,-7); const lists=await Promise.all(LOTTERIES.map(l=>fetchHistory(l.api,start,dateOffset(date,-1))));
       if(req!==state.request)return;
       const rows=lists.flat(); if(rows.length<40) throw new Error(`Histórico cruzado insuficiente (${rows.length} resultados).`);
       const stats=E.buildStats(rows,date);
       const length=type==='milhar'?4:3, qty=type==='milhar'?100:50;
-      const ranked=E.rankCandidates(length,stats,{},`SUPER|${date}|${type}`,Math.max(qty*2,qty+50));
+      // O ranking pode concentrar os melhores candidatos em poucos grupos.
+      // Primeiro garantimos cobertura entre os 25 grupos e depois completamos
+      // a carteira com os melhores candidatos restantes, até chegar exatamente
+      // a 100 milhares ou 50 centenas.
+      const ranked=E.rankCandidates(length,stats,{},`SUPER|${date}|${type}`,10000);
       const picks=(()=>{
-        const out=[]; const usedGroups=new Set();
-        for(const c of ranked){ if(out.length>=qty)break; const g=E.groupFromTail(c.number.slice(-2)); const diversity=usedGroups.size<18 ? !usedGroups.has(g) : true; if(diversity||out.length>qty-8){out.push(c.number);usedGroups.add(g);} }
+        const out=[]; const seen=new Set();
+        for(const c of ranked){
+          if(out.length>=qty) break;
+          const g=E.groupFromTail(c.number.slice(-2));
+          if(!seen.has(g)){ out.push(c.number); seen.add(g); }
+        }
+        for(const c of ranked){
+          if(out.length>=qty) break;
+          if(!out.includes(c.number)) out.push(c.number);
+        }
         return out.slice(0,qty);
       })();
       const result={kind:'numbers',values:picks}; const snapshot={result,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString()}; saveSnapshot(key,snapshot); renderSuperResult(snapshot);
@@ -5334,7 +5419,7 @@ function renderOracleModalidades(){
   }
 
   function renderSuperResult(snapshot){
-    const type=state.superType, items=snapshot.result?.values||[]; setText('oracleSuperSelectedInfo',type==='milhar'?'100 Milhares — Super Palpitão do Dia':'50 Centenas — Super Palpitão do Dia'); setText('oracleSuperPalpiteResult',`${items.length} combinações analisadas`); setText('oracleSuperDescription','✦ Carteira diária calculada localmente com as quatro fontes de resultados.'); setText('oracleSuperGridTitle',type==='milhar'?'100 milhares selecionadas':'50 centenas selecionadas');
+    const type=state.superType, items=snapshot.result?.values||[]; setText('oracleSuperSelectedInfo',type==='milhar'?'100 Milhares — Super Palpitão do Dia':'50 Centenas — Super Palpitão do Dia'); setText('oracleSuperPalpiteResult',`${items.length} combinações analisadas`); setText('oracleSuperDescription','🔮 Carteira diária analisada com as quatro fontes de resultados.'); setText('oracleSuperGridTitle',type==='milhar'?'100 milhares selecionadas':'50 centenas selecionadas');
     const grid=document.getElementById('oracleSuperGridContainer'); if(!grid)return; grid.innerHTML=items.map(n=>{const b=getBicho(n);return `<div class="super-card"><span class="num">${esc(n)}</span><span class="bicho">${esc(b.name)} · G${String(b.group).padStart(2,'0')}</span></div>`;}).join('');
   }
 
@@ -5353,10 +5438,10 @@ function renderOracleModalidades(){
     }catch(err){setText('oracleStatus',`Não foi possível consultar: ${err.message}`);}
   }
 
-  window.oraculoV11SelectLottery=function(id){ const found=LOTTERIES.find(x=>x.id===id)||LOTTERIES[0]; state.lottery=found; state.time=found.times[0]; syncLegacyState(); renderLotteryList(); renderHours(); renderModalities(); computeNormal(); };
-  window.oraculoV11SelectTime=function(t){state.time=t;syncLegacyState();renderHours();computeNormal();};
-  window.oraculoV11SelectModality=function(m){state.modality=m;syncLegacyState();renderModalities();computeNormal();};
-  window.mudarSubModoOracle=function(mode){state.mode=mode==='sorteio'?'sorteio':'dia';syncLegacyState();syncModeButtons();renderHours();computeNormal();};
+  window.oraculoV11SelectLottery=function(id){ state.request++; state.busy=false; const found=LOTTERIES.find(x=>x.id===id)||LOTTERIES[0]; state.lottery=found; state.time=found.times[0]; syncLegacyState(); renderLotteryList(); renderHours(); renderModalities(); computeNormal(); };
+  window.oraculoV11SelectTime=function(t){state.request++; state.busy=false; state.time=t;syncLegacyState();renderHours();computeNormal();};
+  window.oraculoV11SelectModality=function(m){state.request++; state.busy=false; state.modality=m;syncLegacyState();renderModalities();computeNormal();};
+  window.mudarSubModoOracle=function(mode){state.request++; state.busy=false; state.mode=mode==='sorteio'?'sorteio':'dia';syncLegacyState();syncModeButtons();renderHours();computeNormal();};
   window.mudarModoOracle=function(mode){
     const normal=document.getElementById('oracleViewPorLoteria'), superView=document.getElementById('oracleViewSuperPalpitao');
     if(mode==='super'){
