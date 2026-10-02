@@ -6670,5 +6670,501 @@ function renderOracleModalidades(){
   document.addEventListener('click',()=>setTimeout(sync,0),{passive:true});
 })();
 </script>
+<script id="oraculo-v31-hierarchical-generator">
+/*
+  ORÁCULO V31 — GERADOR HIERÁRQUICO DE CANDIDATOS
+  --------------------------------------------------
+  A geração não parte de uma lista de resultados anteriores.
+  Ela constrói candidatos novos a partir de:
+    1) Bicho do Dia;
+    2) Viradinha + evidência histórica;
+    3) sorteio anterior / bicho do momento / sinal especial;
+    4) ranking dos grupos;
+    5) combinação de dezenas e dígitos;
+    6) validação estatística do candidato;
+    7) repetição como evidência contextual, nunca como regra absoluta.
+
+  Sorte do Dia, Por Sorteio e Super Palpitão passam pelo mesmo gerador.
+*/
+(function(root){
+  'use strict';
+  const E=root.OraculoV13;
+  if(!E || typeof E.buildStats!=='function' || typeof E.bicho!=='function') return;
+  if(E.__v31HierarchicalGenerator) return;
+
+  const GROUPS=Array.isArray(E.GROUPS)?E.GROUPS:[];
+  const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+  const logNorm=(v,max)=>{ if(!Number.isFinite(v)||v<=0||!Number.isFinite(max)||max<=0)return 0; return Math.log1p(v)/Math.log1p(max); };
+  const hash=(s)=>{let h=2166136261>>>0;const t=String(s);for(let i=0;i<t.length;i++){h^=t.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0)/4294967295;};
+  const pad=(n,l)=>String(n??'').replace(/\D/g,'').slice(-l).padStart(l,'0');
+  const dayMs=86400000;
+  const dateMs=(s)=>{const m=String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);return m?Date.UTC(+m[1],+m[2]-1,+m[3]):NaN;};
+  const ageDays=(ref,d)=>{const a=dateMs(ref),b=dateMs(d);return Number.isFinite(a)&&Number.isFinite(b)?Math.max(0,Math.round((a-b)/dayMs)):999;};
+  const groupFromTail=(t)=>E.groupFromTail(String(t).padStart(2,'0'));
+
+  function weightedChoice(items, weightFn, seed){
+    if(!items.length) return null;
+    const weights=items.map((x,i)=>Math.max(0.000001,Number(weightFn(x,i))||0));
+    const total=weights.reduce((a,b)=>a+b,0);
+    if(total<=0) return items[Math.floor(hash(seed)*items.length)%items.length];
+    let target=hash(seed)*total;
+    for(let i=0;i<items.length;i++){ target-=weights[i]; if(target<=0)return items[i]; }
+    return items[items.length-1];
+  }
+
+  function groupEvidence(stats,options,context){
+    const calendar=Number(stats?.calendar?.group)||0;
+    const virada=Number(stats?.vir?.group)||0;
+    const previous=Number(options?.previousDraw?.group)||0;
+    const specialFirst=Number(options?.specialSignal?.firstGroup)||0;
+    const specialDominant=Number(options?.specialSignal?.dominantGroup)||0;
+    const momentCounts=stats?.momentGroup||Array(26).fill(0);
+    const maxMoment=Math.max(1,...momentCounts);
+    const maxFreq=Math.max(1,...(stats.groupFreq||[]));
+    const recent=stats.recent2Group||[];
+    const maxRecent=Math.max(1,...recent.flat());
+    const weekday=new Date(`${stats.referenceDate}T12:00:00`).getDay();
+    const weekdayRow=stats.weekdayGroup?.[weekday]||[];
+    const maxWeek=Math.max(1,...weekdayRow);
+
+    // Evidência histórica: antes de favorecer calendário/Viradinha,
+    // medimos se o sinal realmente aparece nos sorteios anteriores.
+    const draws=Array.isArray(stats.draws)?stats.draws:[];
+    const prizeW={1:.40,2:.24,3:.15,4:.11,5:.07};
+    let calAccum=0,virAccum=0,calTrials=0,virTrials=0;
+    for(const draw of draws){
+      const rows=(draw.rows||[]).slice().sort((a,b)=>a.prize-b.prize).slice(0,5);
+      if(!rows.length)continue;
+      let totalW=0,calW=0,virW=0;
+      const calG=Number(stats.calendar?.group)||0;
+      const virG=Number(stats.vir?.group)||0;
+      for(const r of rows){
+        const w=prizeW[r.prize]||.04,total=Number(r.group)||groupFromTail(String(r.number).slice(-2));
+        totalW+=w;
+        if(total===calG)calW+=w;
+        if(total===virG)virW+=w;
+      }
+      if(totalW){calAccum+=calW/totalW;virAccum+=virW/totalW;calTrials++;virTrials++;}
+    }
+    const baseline=1/25;
+    const calRate=calTrials?calAccum/calTrials:baseline;
+    const virRate=virTrials?virAccum/virTrials:baseline;
+    const calStrength=clamp((calRate-baseline)/.10);
+    const virStrength=clamp((virRate-baseline)/.10);
+
+    const arr=[];
+    for(let g=1;g<=25;g++){
+      const hot=logNorm(stats.groupFreq?.[g]||0,maxFreq);
+      const rec=.58*logNorm(recent?.[0]?.[g]||0,maxRecent)+.27*logNorm(recent?.[1]?.[g]||0,maxRecent)+.15*logNorm(recent?.[2]?.[g]||0,maxRecent);
+      const last=stats.groupLast?.[g];
+      const gap=last==null?stats.ordered.length:Math.max(0,stats.ordered.length-1-last);
+      const delay=clamp(gap/Math.max(8,stats.ordered.length*.20));
+      const wg=logNorm(weekdayRow[g]||0,maxWeek);
+      const moment=logNorm(momentCounts[g]||0,maxMoment);
+      let transition=.5;
+      if(previous){
+        const row=stats.transitionGroup?.[previous]||[];
+        const total=row.reduce((a,b)=>a+b,0);
+        if(total) transition=clamp((row[g]||0)/total*25);
+      }else if(stats.latestDraw?.rows?.length){
+        const pg=stats.latestDraw.rows[0].group;
+        const row=stats.transitionGroup?.[pg]||[];
+        const total=row.reduce((a,b)=>a+b,0);
+        if(total) transition=clamp((row[g]||0)/total*25);
+      }
+      let prize=0, pwSum=0;
+      const pw=[0,.40,.24,.15,.11,.07];
+      for(let p=1;p<=5;p++){
+        const row=stats.prizeGroup?.[p]||[];
+        const total=row.reduce((a,b)=>a+b,0);
+        if(total){prize+=pw[p]*clamp((row[g]||0)/total*25);pwSum+=pw[p];}
+      }
+      prize=pwSum?prize/pwSum:.5;
+
+      // Calendar + Viradinha são o início do contexto, mas só ganham força
+      // se o histórico anterior mostrar que esses sinais aparecem de verdade.
+      const calHit=calendar===g?1:0;
+      const virHit=virada===g?1:0;
+      const sameSignal=calHit&&virHit?1:0;
+      const momentHit=previous===g?1:0;
+      const special=(specialFirst===g?1:0)*.65+(specialDominant===g?1:0)*.35;
+
+      let score=.25*hot+.15*rec+.10*delay+.12*transition+.12*prize+.06*wg+.08*moment+.04*logNorm(stats.coGroup?.[previous]?.[g]||0,Math.max(1,...(stats.coGroup?.[previous]||[])));
+      const calSignal=calHit*(.08+.14*calStrength);
+      const virSignal=virHit*(.06+.16*virStrength);
+      const synergy=(calHit&&virHit)?.055:0;
+      score+=calSignal+virSignal+synergy+.07*special;
+      // Repetição de grupo não é proibida; apenas perde uma pequena preferência
+      // quando o mesmo grupo acabou de aparecer no sorteio anterior.
+      if(momentHit) score-=.018;
+      score+= (hash(`${context}|GROUP|${g}`)-.5)*.018;
+      arr.push({group:g,score,hot,rec,delay,transition,prize,calendar:calHit,virada:virHit,moment,special});
+    }
+    arr.sort((a,b)=>b.score-a.score||b.hot-a.hot||a.group-b.group);
+    return arr;
+  }
+
+  function conditionalDigit(stats,position,previousDigit,seed){
+    const direct=stats.digitFreq?.[position]||Array(10).fill(0);
+    const weights=direct.map(v=>v*.65+0.35);
+    if(position>0 && Number.isInteger(previousDigit)){
+      const pairMap=stats.pairFreq?.[position-1];
+      const pairWeights=Array(10).fill(0);
+      if(pairMap){
+        for(let d=0;d<10;d++){
+          const arr=pairMap.get(`${previousDigit}${d}`);
+          if(arr) pairWeights[d]+=arr.reduce((a,b)=>a+b,0);
+        }
+      }
+      for(let d=0;d<10;d++) weights[d]=weights[d]*.45+pairWeights[d]*.55+0.01;
+    }
+    return weightedChoice(Array.from({length:10},(_,d)=>d),d=>weights[d],seed);
+  }
+
+  function tailCandidatesForGroup(group,stats,context){
+    const g=GROUPS[group-1];
+    if(!g)return [];
+    const maxFreq=Math.max(1,...(stats.tailFreq||[]));
+    return g.dezenas.map((t,i)=>{
+      const tail=Number(t);
+      const freq=logNorm(stats.tailFreq?.[tail]||0,maxFreq);
+      const recent=.58*logNorm(stats.recent2?.[0]?.[tail]||0,maxFreq)+.27*logNorm(stats.recent2?.[1]?.[tail]||0,maxFreq)+.15*logNorm(stats.recent2?.[2]?.[tail]||0,maxFreq);
+      let prize=0;
+      const rows=stats.prizeTail||[];
+      const p1=rows[1]||[]; const p2=rows[2]||[];
+      prize=.65*logNorm(p1[tail]||0,Math.max(1,...p1))+.35*logNorm(p2[tail]||0,Math.max(1,...p2));
+      const last=stats.tailLast?.[tail]; const gap=last==null?stats.ordered.length:Math.max(0,stats.ordered.length-1-last);
+      const delay=clamp(gap/Math.max(8,stats.ordered.length*.20));
+      const score=.45*freq+.25*recent+.20*prize+.10*delay+(hash(`${context}|TAIL|${t}`)-.5)*.02;
+      return {tail:t,score};
+    }).sort((a,b)=>b.score-a.score);
+  }
+
+  function recentExactMeta(stats,value,length,referenceDate){
+    const key=pad(value,length);
+    let last=null,lastPrize=99,occurCount=0,recent7=0,recent1=0;
+    for(const r of (stats.ordered||[])){
+      const k=String(r.number||'').slice(-length).padStart(length,'0');
+      if(k!==key)continue;
+      occurCount++;
+      const age=ageDays(referenceDate,r.date);
+      if(age<=7)recent7++;
+      if(age<=1)recent1++;
+      if(last===null || age<last || (age===last && Number(r.prize)<lastPrize)){last=age;lastPrize=Number(r.prize)||99;}
+    }
+    return {lastAge:last===null?999:last,lastPrize,occurCount,recent7,recent1};
+  }
+
+  function validateCandidate(value,length,stats,options,context,groupInfo,profile){
+    const reference=options.referenceDate||stats.referenceDate;
+    const full=String(value).padStart(4,'0');
+    const number=full.slice(-length);
+    const g=groupFromTail(full.slice(-2));
+    // Pontuação de validação independente do histórico de candidatos.
+    // O número foi criado pelo sintetizador; aqui usamos o histórico somente
+    // para verificar a coerência estatística dele.
+    const tail=Number(full.slice(-2));
+    const maxTail=Math.max(1,...(stats.tailFreq||[]));
+    const tailFreq=logNorm(stats.tailFreq?.[tail]||0,maxTail);
+    const recent=.58*logNorm(stats.recent2?.[0]?.[tail]||0,maxTail)
+      +.27*logNorm(stats.recent2?.[1]?.[tail]||0,maxTail)
+      +.15*logNorm(stats.recent2?.[2]?.[tail]||0,maxTail);
+    const gap=(stats.tailLast?.[tail]==null)?stats.ordered.length:Math.max(0,stats.ordered.length-1-stats.tailLast[tail]);
+    const overdue=clamp(gap/Math.max(8,stats.ordered.length*.20));
+    const exactCount=length===4?(stats.fullFreq?.get(full)||0):length===3?(stats.prefix3Freq?.get(full.slice(-3))||0):(stats.prefix2Freq?.get(full.slice(-2))||0);
+    const exactMax=length===4?Math.max(1,...[...(stats.fullFreq?.values?.()||[0])]):length===3?Math.max(1,...[...(stats.prefix3Freq?.values?.()||[0])]):Math.max(1,...[...(stats.prefix2Freq?.values?.()||[0])]);
+    const exact=logNorm(exactCount,exactMax);
+    let digits=0; const offset=4-length;
+    for(let p=offset;p<4;p++){const row=stats.digitFreq?.[p]||Array(10).fill(0);digits+=logNorm(row[Number(full[p])]||0,Math.max(1,...row));}
+    digits/=Math.max(1,length);
+    let pair=0,pairN=0;
+    if(length>=3){for(let p=0;p<length-2;p++){const pairKey=full.slice(p,p+2),next=Number(full[p+2]);const arr=stats.pairFreq?.[p]?.get(pairKey);if(arr){const total=arr.reduce((a,b)=>a+b,0);if(total){pair+=(arr[next]||0)/total;pairN++;}}}}
+    pair=pairN?pair/pairN:.5;
+    let triple=0,tripleN=0;
+    if(length===4){for(let p=0;p<2;p++){const triKey=full.slice(p,p+3),next=Number(full[p+3]);const arr=stats.tripleFreq?.[p]?.get(triKey);if(arr){const total=arr.reduce((a,b)=>a+b,0);if(total){triple+=(arr[next]||0)/total;tripleN++;}}}}
+    triple=tripleN?triple/tripleN:.5;
+    let transition=.5;
+    const prev=options.previousDraw||stats.latestDraw?.rows?.[0];
+    if(prev){const prevTail=Number(prev.number.slice(-2));const row=stats.transitionTail?.get(prevTail)||[];const total=row.reduce((a,b)=>a+b,0);if(total)transition=clamp((row[tail]||0)/total*25);}
+    const weekday=new Date(`${reference}T12:00:00`).getDay();
+    const wg=stats.weekdayGroup?.[weekday]||[];const wgTotal=wg.reduce((a,b)=>a+b,0);
+    const weekdayScore=wgTotal?clamp((wg[g]||0)/wgTotal*25):.5;
+    let prize=0,pwSum=0;const pw=[0,.40,.24,.15,.11,.07];
+    for(let pr=1;pr<=5;pr++){const row=stats.prizeTail?.[pr]||[];const total=row.reduce((a,b)=>a+b,0);if(total){prize+=pw[pr]*clamp((row[tail]||0)/total*25);pwSum+=pw[pr];}}
+    prize=pwSum?prize/pwSum:.5;
+    let moment=.45; if(stats.momentGroup?.[g]||stats.momentTail?.[tail]){const gm=logNorm(stats.momentGroup?.[g]||0,Math.max(1,...(stats.momentGroup||[])));const tm=logNorm(stats.momentTail?.[tail]||0,Math.max(1,...(stats.momentTail||[])));moment=.72*gm+.28*tm;}
+    const calendar=g===Number(stats.calendar?.group)?1:0;
+    const virada=g===Number(stats.vir?.group)?1:0;
+    const special=(g===Number(options.specialSignal?.firstGroup)?0.6:0)+(g===Number(options.specialSignal?.dominantGroup)?0.4:0);
+    const grp=groupInfo?.find(x=>x.group===g);
+    const groupScore=grp?.score||0;
+    const maxGroup=Math.max(.0001,...(groupInfo||[]).map(x=>x.score));
+    const groupPrior=clamp(groupScore/maxGroup);
+    const pWeights={milhar:{freq:.11,recent:.09,overdue:.06,digits:.08,transition:.10,group:.12,prize:.14,calendar:.05,virada:.05,moment:.08,exact:.05,pair:.04,triple:.03},centena:{freq:.10,recent:.11,overdue:.08,digits:.15,transition:.10,group:.12,prize:.14,calendar:.05,virada:.05,moment:.06,exact:.05,pair:.05,triple:.04},dezena:{freq:.16,recent:.16,overdue:.11,digits:.12,transition:.08,group:.12,prize:.10,calendar:.05,virada:.05,moment:.04,exact:.03,pair:.05,triple:.03},duque:{freq:.15,recent:.15,overdue:.12,digits:.10,transition:.12,group:.12,prize:.09,calendar:.04,virada:.04,moment:.04,exact:.02,pair:.06,triple:.05},terno:{freq:.13,recent:.14,overdue:.14,digits:.10,transition:.12,group:.13,prize:.08,calendar:.04,virada:.04,moment:.04,exact:.02,pair:.07,triple:.05},palpitao:{freq:.14,recent:.15,overdue:.12,digits:.11,transition:.09,group:.13,prize:.09,calendar:.05,virada:.05,moment:.04,exact:.02,pair:.06,triple:.05}};
+    const pwgt=pWeights[profile]||pWeights.palpitao;
+    const base=pwgt.freq*tailFreq+pwgt.recent*recent+pwgt.overdue*overdue+pwgt.digits*digits+pwgt.transition*transition+pwgt.group*groupPrior+pwgt.prize*prize+pwgt.calendar*calendar+pwgt.virada*virada+pwgt.moment*moment+pwgt.exact*exact+pwgt.pair*pair+pwgt.triple*triple+.045*special;
+
+    const meta=recentExactMeta(stats,number,length,reference);
+    const calendarHit=g===Number(stats.calendar?.group);
+    const viradaHit=g===Number(stats.vir?.group);
+    const momentHit=g===Number(options.momentGroup||0);
+    const specialFirst=g===Number(options.specialSignal?.firstGroup||0);
+    const specialDom=g===Number(options.specialSignal?.dominantGroup||0);
+
+    // Validação em camadas. O candidato só é promovido se continuar coerente
+    // depois de passar por todos os sinais; repetir não cria vantagem automática.
+    const contextMatches=(calendarHit?1:0)+(viradaHit?1:0)+(momentHit?1:0)+(specialFirst?1:0)+(specialDom?1:0);
+    const freshness=(meta.lastAge===999?1:meta.lastAge>7?.90:meta.lastAge>3?.55:meta.lastAge>1?.25:0);
+    const rarity=meta.lastAge===999?1:meta.lastPrize===1?.18:meta.lastPrize<=5?.10:.05;
+    let repeatPenalty=0;
+    if(meta.lastAge<=1){
+      repeatPenalty=length===4?.34:length===3?.18:.065;
+      if(meta.lastPrize===1)repeatPenalty*=1.22;
+    }else if(meta.lastAge<=3){
+      repeatPenalty=length===4?.13:length===3?.065:.025;
+      if(meta.lastPrize===1)repeatPenalty*=1.12;
+    }else if(meta.lastAge<=7){
+      repeatPenalty=length===4?.055:length===3?.025:.010;
+    }
+
+    const validation=.42*clamp(base)+.22*groupPrior+.11*contextMatches/5+.09*freshness+.06*rarity+.10*clamp((stats?.recent2Group?.[0]?.[g]||0)/(Math.max(1,...(stats.recent2Group?.[0]||[]))));
+    const score=validation-repeatPenalty;
+    return {score,rawScore:base,groupPrior,contextMatches,freshness,repeatPenalty,meta,number,group:g};
+  }
+
+  function synthesize(length,stats,options,context,profile='milhar',attempts=2200){
+    const groups=groupEvidence(stats,options,context);
+    const topGroups=groups.slice(0,Math.min(15,groups.length));
+    const broadGroups=groups.slice(0,Math.min(22,groups.length));
+    const out=new Map();
+    const ref=options.referenceDate||stats.referenceDate;
+    const superMode=!!options.super || String(context).startsWith('SUPER|');
+
+    for(let i=0;i<attempts && out.size<Math.min(attempts,2400);i++){
+      // A cada rodada alternamos entre os grupos mais fortes e uma faixa mais ampla
+      // para não deixar o calendário esmagar a diversidade por completo.
+      const pool=(i%5===0?broadGroups:topGroups);
+      const gObj=weightedChoice(pool,x=>Math.exp((x.score-(pool[0]?.score||0))/0.42)+.08,`${context}|GSEL|${i}`);
+      if(!gObj)continue;
+      const tails=tailCandidatesForGroup(gObj.group,stats,context);
+      const tailObj=weightedChoice(tails,x=>Math.exp((x.score-(tails[0]?.score||0))/0.55)+.05,`${context}|TSEL|${i}`);
+      if(!tailObj)continue;
+      const t=String(tailObj.tail).padStart(2,'0');
+      let n='';
+      if(length===2){
+        n=t;
+      }else if(length===3){
+        const d=conditionalDigit(stats,1,null,`${context}|D1|${i}`);
+        n=String(d)+t;
+      }else{
+        const d0=conditionalDigit(stats,0,null,`${context}|D0|${i}`);
+        const d1=conditionalDigit(stats,1,d0,`${context}|D1|${i}`);
+        n=`${d0}${d1}${t}`;
+      }
+      n=pad(n,length);
+      if(out.has(n))continue;
+      const validation=validateCandidate(n,length,stats,options,context,groups,profile);
+      // A segunda geração usa uma temperatura um pouco diferente e valoriza
+      // candidatos nunca vistos recentemente. Isso não copia resultados; apenas
+      // permite que combinações estatisticamente fortes sobrevivam à validação.
+      const exploration=(hash(`${context}|EXP|${n}`)-.5)*0.035;
+      out.set(n,{number:n,score:validation.score+exploration,_validation:validation,_groupScore:gObj.score});
+    }
+
+    // Se a amostra for pequena, ainda garantimos cobertura de todos os grupos
+    // fortes criando combinações determinísticas adicionais.
+    for(const gObj of broadGroups){
+      if(out.size>=Math.min(attempts,2600))break;
+      for(const tObj of tailCandidatesForGroup(gObj.group,stats,context)){
+        if(out.size>=Math.min(attempts,2600))break;
+        const t=tObj.tail;
+        let n;
+        if(length===2)n=t;
+        else if(length===3)n=`${Math.floor(hash(`${context}|F|${gObj.group}|${t}`)*10)}${t}`;
+        else n=`${Math.floor(hash(`${context}|F0|${gObj.group}|${t}`)*10)}${Math.floor(hash(`${context}|F1|${gObj.group}|${t}`)*10)}${t}`;
+        n=pad(n,length);
+        if(out.has(n))continue;
+        const v=validateCandidate(n,length,stats,options,context,groups,profile);
+        out.set(n,{number:n,score:v.score,_validation:v,_groupScore:gObj.score});
+      }
+    }
+
+    const ranked=[...out.values()].sort((a,b)=>b.score-a.score||hash(`${context}|${a.number}`)-hash(`${context}|${b.number}`));
+
+    // Preferência por candidato novo: repetidos continuam possíveis, mas quando
+    // ficam estatisticamente próximos do melhor candidato fresco, o fresco sobe.
+    const fresh=ranked.filter(x=>x._validation?.meta?.lastAge===999||x._validation?.meta?.lastAge>7);
+    if(fresh.length && ranked.length){
+      const top=ranked[0],m=top._validation?.meta;
+      if(m && m.lastAge<=7){
+        const freshTop=fresh[0];
+        const gap=Number(top.score)-Number(freshTop.score);
+        const threshold=length===4?.085:length===3?.045:.018;
+        if(gap<threshold){
+          const idx=ranked.indexOf(freshTop);ranked.splice(idx,1);ranked.unshift(freshTop);
+        }
+      }
+    }
+    return {ranked,groups,meta:{generatedCandidates:ranked.length,referenceDate:ref,calendar:stats.calendar,viradinha:stats.vir}};
+  }
+
+  function rankCandidatesV31(length,stats,options={},context='',limit=100){
+    const profile=options.profile||options.kind|| (length===4?'milhar':length===3?'centena':'dezena');
+    const attempts=length===4?2600:length===3?2200:900;
+    const generated=synthesize(length,stats,options,context,profile,attempts);
+    return generated.ranked.slice(0,Math.max(50,limit));
+  }
+
+  function pickDiversified(ranked,count,context,avoid=new Set(),temperature=.60){
+    const candidates=ranked.filter(x=>!avoid.has(String(x.number)));
+    const out=[]; const usedGroups=new Map();
+    let work=candidates.slice();
+    while(out.length<count && work.length){
+      const top=work.slice(0,Math.min(work.length,Math.max(40,Math.floor(candidates.length*.68))));
+      const chosen=weightedChoice(top,x=>{
+        const g=groupFromTail(x.number.slice(-2));
+        const penalty=1/(1+(usedGroups.get(g)||0)*.8);
+        return Math.exp((x.score-top[0].score)/Math.max(.16,temperature))*penalty;
+      },`${context}|PICK|${out.length}`);
+      if(!chosen)break;
+      out.push(chosen);usedGroups.set(groupFromTail(chosen.number.slice(-2)),(usedGroups.get(groupFromTail(chosen.number.slice(-2)))||0)+1);
+      work=work.filter(x=>x!==chosen);
+    }
+    return out;
+  }
+
+  function buildPortfolioV31(stats,baseContext,options={},avoidPortfolio={}){
+    const o={...(options||{})};
+    o.referenceDate=o.referenceDate||stats.referenceDate;
+    o.previousRows=Array.isArray(o.previousRows)?o.previousRows:[];
+    o.previousDraw=o.previousDraw||o.previousRows[0]||null;
+    const groupRank=groupEvidence(stats,o,`${baseContext}|GROUP_CONTEXT`);
+    const selectedGroup=groupRank.find(x=>!(avoidPortfolio.grupo||[]).map(Number).includes(x.group))?.group||groupRank[0]?.group||stats.calendar?.group||1;
+
+    const mil=rankCandidatesV31(4,stats,{...o,profile:'milhar'},`${baseContext}|GEN|MILHAR`,160).map(x=>x);
+    const cent=rankCandidatesV31(3,stats,{...o,profile:'centena'},`${baseContext}|GEN|CENTENA`,160).map(x=>x);
+    const dez=rankCandidatesV31(2,stats,{...o,profile:'dezena'},`${baseContext}|GEN|DEZENA`,160).map(x=>x);
+
+    const milPick=mil[0]?.number||'0000';
+    const centCandidates=cent.filter(x=>x.number!==milPick.slice(-3));
+    const centPick=centCandidates[0]?.number||cent[0]?.number||'000';
+    const avoidD=new Set([milPick.slice(-2),centPick.slice(-2)]);
+    const dezPick=dez.find(x=>!avoidD.has(x.number))?.number||dez[0]?.number||'00';
+
+    const duqueRank=rankCandidatesV31(2,stats,{...o,profile:'duque'},`${baseContext}|GEN|DUQUE`,180);
+    const duqueAvoid=new Set([dezPick,milPick.slice(-2),centPick.slice(-2)]);
+    const duque=pickDiversified(duqueRank,2,`${baseContext}|DUQUE`,duqueAvoid,.58);
+
+    const ternoAvoid=new Set([...duque.map(x=>x.number),...duqueAvoid]);
+    const terno=pickDiversified(rankCandidatesV31(2,stats,{...o,profile:'terno'},`${baseContext}|GEN|TERNO`,200),3,`${baseContext}|TERNO`,ternoAvoid,.62);
+
+    const palAvoid=new Set([dezPick,milPick.slice(-2),centPick.slice(-2),...duque.map(x=>x.number),...terno.map(x=>x.number),...(avoidPortfolio.palpitao||[]).map(String)]);
+    const palCandidates=rankCandidatesV31(2,stats,{...o,profile:'palpitao'},`${baseContext}|GEN|PALPITAO`,300);
+    const palpitao=pickDiversified(palCandidates,20,`${baseContext}|PALPITAO`,palAvoid,.72).map(x=>x.number);
+
+    const dg=groupRank.filter(x=>x.group!==selectedGroup).slice(0,2).map(x=>x.group);
+    const tg=groupRank.filter(x=>x.group!==selectedGroup&&!dg.includes(x.group)).slice(0,3).map(x=>x.group);
+    const pv=groupRank.filter(x=>x.group!==selectedGroup&&!dg.includes(x.group)&&!tg.includes(x.group)).slice(0,2).map(x=>x.group);
+
+    return {
+      milhar:[milPick],centena:[centPick],dezena:[dezPick],
+      duque_dezena:duque.map(x=>x.number),terno_dezena:terno.map(x=>x.number),
+      grupo:[selectedGroup],duque_grupo:dg,terno_grupo:tg,passe_vai:pv,palpitao,
+      ranking:{milhar:mil,centena:cent,dezena:dez,palpitao:palCandidates},
+      hierarchy:{calendar:stats.calendar,viradinha:stats.vir,chosenGroup:selectedGroup,topGroups:groupRank.slice(0,8).map(x=>x.group),generated:true}
+    };
+  }
+
+  E.rankCandidates=rankCandidatesV31;
+  E.buildPortfolio=buildPortfolioV31;
+  E.buildPrediction=function(modality,stats,options={},context='',avoid={}){
+    const pack=buildPortfolioV31(stats,context,options,avoid);
+    const vals=pack[modality]||[];
+    const groups=['grupo','duque_grupo','terno_grupo','passe_vai'].includes(modality);
+    return {kind:groups?'groups':'numbers',values:vals,portfolio:pack,ranking:pack.ranking?.[modality]||[]};
+  };
+  E.__v31HierarchicalGenerator=true;
+  root.OraculoV31={synthesize,groupEvidence,validateCandidate,rankCandidatesV31,buildPortfolioV31};
+
+  // Ciclo novo: previsões congeladas das versões anteriores não podem mascarar
+  // a geração nova. Mantemos somente ORACULO_V31 após esta migração inicial.
+  try{
+    const oldPrefixes=['ORACULO_V16|','ORACULO_V17|','ORACULO_V18|','ORACULO_V19|','ORACULO_V20|','ORACULO_V21|','ORACULO_V22|','ORACULO_V23|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|','ORACULO_V29|','ORACULO_V30|','ORACULO_FINAL_V'];
+    if(localStorage.getItem('ORACULO_V31_MIGRATED')!=='1'){
+      const remove=[];
+      for(let i=localStorage.length-1;i>=0;i--){
+        const k=localStorage.key(i)||'';
+        if(oldPrefixes.some(p=>k.startsWith(p)))remove.push(k);
+      }
+      remove.forEach(k=>localStorage.removeItem(k));
+      localStorage.setItem('ORACULO_V31_MIGRATED','1');
+    }
+  }catch(_){ }
+
+})(typeof window!=='undefined'?window:globalThis);
+</script>
+
+<style id="oraculo-v31-loading-style">
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-text{
+  animation:oracleV31Pulse 1.15s ease-in-out infinite;
+}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span{
+  animation:oracleV31Scan 1s ease-in-out infinite;
+}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(2){animation-delay:.08s}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(3){animation-delay:.16s}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(4){animation-delay:.24s}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(5){animation-delay:.32s}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(6){animation-delay:.40s}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(7){animation-delay:.48s}
+#oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-scan span:nth-child(8){animation-delay:.56s}
+@keyframes oracleV31Pulse{0%,100%{opacity:.58}50%{opacity:1}}
+@keyframes oracleV31Scan{0%,100%{opacity:.28;transform:scaleX(.72)}50%{opacity:1;transform:scaleX(1)}}
+</style>
+
+<script id="oraculo-v31-loading-ui">
+(function(){
+  'use strict';
+  if(window.__oraculoV31LoadingInstalled)return;
+  window.__oraculoV31LoadingInstalled=true;
+  let timer=0;
+  let seq=0;
+  function show(){
+    const card=document.getElementById('oracleEngineCard');
+    if(card)card.classList.add('oracle-v31-thinking');
+    const t=document.getElementById('oracleEngineText');
+    if(t)t.textContent='🔮 Criando e conferindo combinações com as estatísticas...';
+    const p=document.getElementById('oraclePalpiteResult');
+    if(p)p.textContent='••••';
+    const b=document.getElementById('oracleBichoResult');
+    if(b)b.textContent='⏳ O Oráculo está calculando os candidatos...';
+  }
+  function cancelAndRun(fn,args,delay){
+    const my=++seq;
+    if(timer)clearTimeout(timer);
+    show();
+    timer=setTimeout(()=>{if(my!==seq)return;fn.apply(window,args||[]);},delay);
+  }
+  function wrap(name,delay){
+    const fn=window[name];
+    if(typeof fn!=='function'||fn.__v31Wrapped)return;
+    const w=function(...args){cancelAndRun(fn,args,delay);};
+    w.__v31Wrapped=true;
+    window[name]=w;
+  }
+  function install(){
+    wrap('oraculoV14SelectLottery',850);
+    wrap('oraculoV14SelectTime',950);
+    wrap('oraculoV14SelectModality',900);
+    wrap('mudarSubModoOracle',900);
+    wrap('mudarModoOracle',1050);
+    wrap('setOracleSuperType',1100);
+    wrap('generateOraclePicks',900);
+  }
+  window.addEventListener('load',()=>setTimeout(install,220));
+  document.addEventListener('click',()=>setTimeout(install,20),{passive:true});
+})();
+</script>
+
 </body>
 </html>
