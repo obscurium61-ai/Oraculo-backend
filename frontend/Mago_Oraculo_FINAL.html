@@ -1,11 +1,12 @@
 <!DOCTYPE html>
+
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mago vs Oráculo - Palpites do Bicho</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <style>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Mago vs Oráculo - Palpites do Bicho</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&amp;display=swap" rel="stylesheet"/>
+<style>
         :root {
             --bg-dark: #0f0913;
             --card-bg: #1a1024;
@@ -746,7 +747,6 @@
             text-align: center;
         }
     </style>
-
 <style id="opening-screen-styles">
     /* ===== Tela de entrada HTML5/CSS/SVG — não altera o layout do app ===== */
     html, body { overflow-x: hidden; }
@@ -1115,302 +1115,265 @@
         #openingScreen *, #openingScreen::before { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
     }
 </style>
-
-</head>
+<style id="oraculo-v32-interaction-style">#openingScreen.closing, #openingScreen[data-opened="1"] { pointer-events: none !important; }
+</style></head>
 <body class="app-locked">
-
 <!-- TELA DE ENTRADA: animação HTML5/CSS/SVG, sem imagem externa -->
-<div id="openingScreen" aria-label="Tela de entrada">
-    <div class="opening-scene">
-        <div class="opening-title"><span>🔮 MAGO</span><span class="vs">VS</span><span>✨ ORÁCULO</span></div>
-        <div class="opening-subtitle">PALPITES DO BICHO</div>
-
-        <div class="wizard left" aria-hidden="true">
-            <svg viewBox="0 0 170 235" role="presentation">
-                <defs>
-                    <linearGradient id="wBlueRobe" x1="0" x2="1">
-                        <stop offset="0" stop-color="#08142b"/>
-                        <stop offset=".55" stop-color="#173c8e"/>
-                        <stop offset="1" stop-color="#0b163d"/>
-                    </linearGradient>
-                    <linearGradient id="wBlueFace" x1="0" x2="1">
-                        <stop offset="0" stop-color="#9d6247"/>
-                        <stop offset="1" stop-color="#4f2b27"/>
-                    </linearGradient>
-                    <linearGradient id="wBlueHood" x1="0" x2="1">
-                        <stop offset="0" stop-color="#061329"/>
-                        <stop offset=".5" stop-color="#224ab1"/>
-                        <stop offset="1" stop-color="#0b1636"/>
-                    </linearGradient>
-                    <filter id="wBlueGlow" x="-80%" y="-80%" width="260%" height="260%">
-                        <feGaussianBlur stdDeviation="3" result="b"/>
-                        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-                    </filter>
-                </defs>
-                <g class="wizard-glow" filter="url(#wBlueGlow)">
-                    <path d="M20 216 Q85 170 150 216 L156 235 L14 235 Z" fill="url(#wBlueRobe)" stroke="#4fd4ff" stroke-opacity=".42"/>
-                    <path d="M44 83 Q35 35 85 7 Q135 35 126 83 Q119 124 85 153 Q51 124 44 83Z" fill="url(#wBlueHood)" stroke="#59c9ff" stroke-opacity=".55"/>
-                    <path d="M57 77 Q61 50 84 49 Q109 51 113 78 L107 111 Q98 128 85 130 Q72 128 63 111Z" fill="url(#wBlueFace)"/>
-                    <path d="M61 75 Q69 61 78 63 L74 76 L62 82Z M108 75 Q99 61 90 63 L95 77 L108 82Z" fill="#070c1b"/>
-                    <path d="M68 86 Q76 81 83 86 M98 86 Q91 81 84 86" stroke="#6be7ff" stroke-width="5" stroke-linecap="round"/>
-                    <path d="M75 104 Q85 111 95 104" fill="none" stroke="#3b2021" stroke-width="3" stroke-linecap="round"/>
-                    <path d="M20 189 Q3 166 11 151 Q19 136 34 147 Q44 158 39 178" fill="#b36d4e" stroke="#4fd4ff" stroke-opacity=".5"/>
-                    <path d="M150 189 Q167 166 159 151 Q151 136 136 147 Q126 158 131 178" fill="#b36d4e" stroke="#4fd4ff" stroke-opacity=".5"/>
-                    <path d="M31 149 Q17 135 14 110" stroke="#5de0ff" stroke-width="4" stroke-linecap="round" opacity=".75"/>
-                </g>
-            </svg>
-            <div class="wizard-label">MAGO</div>
-        </div>
-
-        <div class="wizard right" aria-hidden="true">
-            <svg viewBox="0 0 170 235" role="presentation">
-                <defs>
-                    <linearGradient id="wGoldRobe" x1="0" x2="1">
-                        <stop offset="0" stop-color="#2b1308"/>
-                        <stop offset=".55" stop-color="#743416"/>
-                        <stop offset="1" stop-color="#241006"/>
-                    </linearGradient>
-                    <linearGradient id="wGoldFace" x1="0" x2="1">
-                        <stop offset="0" stop-color="#a85f3b"/>
-                        <stop offset="1" stop-color="#4d241e"/>
-                    </linearGradient>
-                    <linearGradient id="wGoldHood" x1="0" x2="1">
-                        <stop offset="0" stop-color="#321207"/>
-                        <stop offset=".5" stop-color="#a84a17"/>
-                        <stop offset="1" stop-color="#361107"/>
-                    </linearGradient>
-                    <filter id="wGoldGlow" x="-80%" y="-80%" width="260%" height="260%">
-                        <feGaussianBlur stdDeviation="3" result="b"/>
-                        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-                    </filter>
-                </defs>
-                <g class="wizard-glow" filter="url(#wGoldGlow)">
-                    <path d="M20 216 Q85 170 150 216 L156 235 L14 235 Z" fill="url(#wGoldRobe)" stroke="#ffc85b" stroke-opacity=".46"/>
-                    <path d="M44 83 Q35 35 85 7 Q135 35 126 83 Q119 124 85 153 Q51 124 44 83Z" fill="url(#wGoldHood)" stroke="#ffd066" stroke-opacity=".55"/>
-                    <path d="M57 77 Q61 50 84 49 Q109 51 113 78 L107 111 Q98 128 85 130 Q72 128 63 111Z" fill="url(#wGoldFace)"/>
-                    <path d="M61 75 Q69 61 78 63 L74 76 L62 82Z M108 75 Q99 61 90 63 L95 77 L108 82Z" fill="#090807"/>
-                    <path d="M68 86 Q76 81 83 86 M98 86 Q91 81 84 86" stroke="#ffd869" stroke-width="5" stroke-linecap="round"/>
-                    <path d="M75 104 Q85 111 95 104" fill="none" stroke="#391815" stroke-width="3" stroke-linecap="round"/>
-                    <path d="M20 189 Q3 166 11 151 Q19 136 34 147 Q44 158 39 178" fill="#ac603f" stroke="#ffd066" stroke-opacity=".5"/>
-                    <path d="M150 189 Q167 166 159 151 Q151 136 136 147 Q126 158 131 178" fill="#ac603f" stroke="#ffd066" stroke-opacity=".5"/>
-                    <path d="M140 149 Q153 133 156 110" stroke="#ffd56e" stroke-width="4" stroke-linecap="round" opacity=".75"/>
-                </g>
-            </svg>
-            <div class="wizard-label">ORÁCULO</div>
-        </div>
-
-        <div class="crystal-zone">
-            <div class="orb-halo"></div>
-            <button class="crystal-ball" id="crystalBall" aria-label="Toque para descobrir sua sorte">
-                <div class="animal-ring" aria-hidden="true">
-                    <div class="animal-chip">🦅</div>
-                    <div class="animal-chip">🐐</div>
-                    <div class="animal-chip">🐅</div>
-                    <div class="animal-chip">🐓</div>
-                    <div class="animal-chip">🐊</div>
-                    <div class="animal-chip">🐕</div>
-                </div>
-                <div class="orb-question">?</div>
-            </button>
-            <div class="orb-base"></div>
-        </div>
-
-        <div class="tap-indicator"></div>
-        <div class="opening-cta">
-            <strong>Toque na bola de cristal para revelar sua sorte</strong>
-            <span>Entre no MAGO e no ORÁCULO e descubra os palpites do dia.</span>
-        </div>
-    </div>
+<div aria-label="Tela de entrada" id="openingScreen">
+<div class="opening-scene">
+<div class="opening-title"><span>🔮 MAGO</span><span class="vs">VS</span><span>✨ ORÁCULO</span></div>
+<div class="opening-subtitle">PALPITES DO BICHO</div>
+<div aria-hidden="true" class="wizard left">
+<svg role="presentation" viewbox="0 0 170 235">
+<defs>
+<lineargradient id="wBlueRobe" x1="0" x2="1">
+<stop offset="0" stop-color="#08142b"></stop>
+<stop offset=".55" stop-color="#173c8e"></stop>
+<stop offset="1" stop-color="#0b163d"></stop>
+</lineargradient>
+<lineargradient id="wBlueFace" x1="0" x2="1">
+<stop offset="0" stop-color="#9d6247"></stop>
+<stop offset="1" stop-color="#4f2b27"></stop>
+</lineargradient>
+<lineargradient id="wBlueHood" x1="0" x2="1">
+<stop offset="0" stop-color="#061329"></stop>
+<stop offset=".5" stop-color="#224ab1"></stop>
+<stop offset="1" stop-color="#0b1636"></stop>
+</lineargradient>
+<filter height="260%" id="wBlueGlow" width="260%" x="-80%" y="-80%">
+<fegaussianblur result="b" stddeviation="3"></fegaussianblur>
+<femerge><femergenode in="b"></femergenode><femergenode in="SourceGraphic"></femergenode></femerge>
+</filter>
+</defs>
+<g class="wizard-glow" filter="url(#wBlueGlow)">
+<path d="M20 216 Q85 170 150 216 L156 235 L14 235 Z" fill="url(#wBlueRobe)" stroke="#4fd4ff" stroke-opacity=".42"></path>
+<path d="M44 83 Q35 35 85 7 Q135 35 126 83 Q119 124 85 153 Q51 124 44 83Z" fill="url(#wBlueHood)" stroke="#59c9ff" stroke-opacity=".55"></path>
+<path d="M57 77 Q61 50 84 49 Q109 51 113 78 L107 111 Q98 128 85 130 Q72 128 63 111Z" fill="url(#wBlueFace)"></path>
+<path d="M61 75 Q69 61 78 63 L74 76 L62 82Z M108 75 Q99 61 90 63 L95 77 L108 82Z" fill="#070c1b"></path>
+<path d="M68 86 Q76 81 83 86 M98 86 Q91 81 84 86" stroke="#6be7ff" stroke-linecap="round" stroke-width="5"></path>
+<path d="M75 104 Q85 111 95 104" fill="none" stroke="#3b2021" stroke-linecap="round" stroke-width="3"></path>
+<path d="M20 189 Q3 166 11 151 Q19 136 34 147 Q44 158 39 178" fill="#b36d4e" stroke="#4fd4ff" stroke-opacity=".5"></path>
+<path d="M150 189 Q167 166 159 151 Q151 136 136 147 Q126 158 131 178" fill="#b36d4e" stroke="#4fd4ff" stroke-opacity=".5"></path>
+<path d="M31 149 Q17 135 14 110" opacity=".75" stroke="#5de0ff" stroke-linecap="round" stroke-width="4"></path>
+</g>
+</svg>
+<div class="wizard-label">MAGO</div>
 </div>
-
-
+<div aria-hidden="true" class="wizard right">
+<svg role="presentation" viewbox="0 0 170 235">
+<defs>
+<lineargradient id="wGoldRobe" x1="0" x2="1">
+<stop offset="0" stop-color="#2b1308"></stop>
+<stop offset=".55" stop-color="#743416"></stop>
+<stop offset="1" stop-color="#241006"></stop>
+</lineargradient>
+<lineargradient id="wGoldFace" x1="0" x2="1">
+<stop offset="0" stop-color="#a85f3b"></stop>
+<stop offset="1" stop-color="#4d241e"></stop>
+</lineargradient>
+<lineargradient id="wGoldHood" x1="0" x2="1">
+<stop offset="0" stop-color="#321207"></stop>
+<stop offset=".5" stop-color="#a84a17"></stop>
+<stop offset="1" stop-color="#361107"></stop>
+</lineargradient>
+<filter height="260%" id="wGoldGlow" width="260%" x="-80%" y="-80%">
+<fegaussianblur result="b" stddeviation="3"></fegaussianblur>
+<femerge><femergenode in="b"></femergenode><femergenode in="SourceGraphic"></femergenode></femerge>
+</filter>
+</defs>
+<g class="wizard-glow" filter="url(#wGoldGlow)">
+<path d="M20 216 Q85 170 150 216 L156 235 L14 235 Z" fill="url(#wGoldRobe)" stroke="#ffc85b" stroke-opacity=".46"></path>
+<path d="M44 83 Q35 35 85 7 Q135 35 126 83 Q119 124 85 153 Q51 124 44 83Z" fill="url(#wGoldHood)" stroke="#ffd066" stroke-opacity=".55"></path>
+<path d="M57 77 Q61 50 84 49 Q109 51 113 78 L107 111 Q98 128 85 130 Q72 128 63 111Z" fill="url(#wGoldFace)"></path>
+<path d="M61 75 Q69 61 78 63 L74 76 L62 82Z M108 75 Q99 61 90 63 L95 77 L108 82Z" fill="#090807"></path>
+<path d="M68 86 Q76 81 83 86 M98 86 Q91 81 84 86" stroke="#ffd869" stroke-linecap="round" stroke-width="5"></path>
+<path d="M75 104 Q85 111 95 104" fill="none" stroke="#391815" stroke-linecap="round" stroke-width="3"></path>
+<path d="M20 189 Q3 166 11 151 Q19 136 34 147 Q44 158 39 178" fill="#ac603f" stroke="#ffd066" stroke-opacity=".5"></path>
+<path d="M150 189 Q167 166 159 151 Q151 136 136 147 Q126 158 131 178" fill="#ac603f" stroke="#ffd066" stroke-opacity=".5"></path>
+<path d="M140 149 Q153 133 156 110" opacity=".75" stroke="#ffd56e" stroke-linecap="round" stroke-width="4"></path>
+</g>
+</svg>
+<div class="wizard-label">ORÁCULO</div>
+</div>
+<div class="crystal-zone">
+<div class="orb-halo"></div>
+<button aria-label="Toque para descobrir sua sorte" class="crystal-ball" id="crystalBall">
+<div aria-hidden="true" class="animal-ring">
+<div class="animal-chip">🦅</div>
+<div class="animal-chip">🐐</div>
+<div class="animal-chip">🐅</div>
+<div class="animal-chip">🐓</div>
+<div class="animal-chip">🐊</div>
+<div class="animal-chip">🐕</div>
+</div>
+<div class="orb-question">?</div>
+</button>
+<div class="orb-base"></div>
+</div>
+<div class="tap-indicator"></div>
+<div class="opening-cta">
+<strong>Toque na bola de cristal para revelar sua sorte</strong>
+<span>Entre no MAGO e no ORÁCULO e descubra os palpites do dia.</span>
+</div>
+</div>
+</div>
 <div class="app-container">
-    <div class="panel-switch-fx" id="panelSwitchFx"><div class="fx-orb" id="panelSwitchFxOrb">🔮</div></div>
-    <div class="app-tabs" id="appTabs">
-        <button class="app-tab active" id="tabMago" onclick="switchAppTab('mago')">🔮 Mago</button>
-        <button class="app-tab" id="tabOraculo" onclick="switchAppTab('oraculo')">✨ Oráculo</button>
-    </div>
-
-    <!-- PAINEL MAGO (INTACTO) -->
-    <div id="magoPanel">
-        <header>
-            <h1>🔮 MAGO</h1>
-            <div class="timer-bar">
+<div class="panel-switch-fx" id="panelSwitchFx"><div class="fx-orb" id="panelSwitchFxOrb">🔮</div></div>
+<div class="app-tabs" id="appTabs">
+<button class="app-tab active" id="tabMago" onclick="switchAppTab('mago')">🔮 Mago</button>
+<button class="app-tab" id="tabOraculo" onclick="switchAppTab('oraculo')">✨ Oráculo</button>
+</div>
+<!-- PAINEL MAGO (INTACTO) -->
+<div id="magoPanel">
+<header>
+<h1>🔮 MAGO</h1>
+<div class="timer-bar">
                 ⏳ Reset dos Palpites: <span id="reset-timer">00:00:00</span>
-            </div>
-        </header>
-
-        <div class="mode-switch">
-            <button class="mode-btn active" id="btnModePorLoteria" onclick="mudarModo('loteria')">🎯 Por Loteria</button>
-            <button class="mode-btn" id="btnModeSuper" onclick="mudarModo('super')">🚀 Super Palpitão</button>
-        </div>
-
-        <!-- MODO 1: POR LOTERIA -->
-        <div class="content" id="viewPorLoteria">
-            <div class="sub-mode-switch">
-                <button class="sub-mode-btn active" id="btnSubSorteDia" onclick="mudarSubModo('dia')">☀️ Sorte do Dia</button>
-                <button class="sub-mode-btn" id="btnSubPorSorteio" onclick="mudarSubModo('sorteio')">⏰ Por Sorteio</button>
-            </div>
-
-            <div class="section-title">1. Selecione a Loteria</div>
-            <div class="lottery-scroll" id="lotteryList"></div>
-
-            <!-- SELEÇÃO DE HORÁRIO -->
-            <div id="containerHorarios" style="display: none;">
-                <div class="section-title">2. Selecione o Horário</div>
-                <div class="horario-scroll" id="horarioList"></div>
-            </div>
-
-            <!-- AVISO DA FEDERAL NO POR SORTEIO -->
-            <div class="notice-box" id="federalNotice" style="display: none;">
+</div>
+</header>
+<div class="mode-switch">
+<button class="mode-btn active" id="btnModePorLoteria" onclick="mudarModo('loteria')">🎯 Por Loteria</button>
+<button class="mode-btn" id="btnModeSuper" onclick="mudarModo('super')">🚀 Super Palpitão</button>
+</div>
+<!-- MODO 1: POR LOTERIA -->
+<div class="content" id="viewPorLoteria">
+<div class="sub-mode-switch">
+<button class="sub-mode-btn active" id="btnSubSorteDia" onclick="mudarSubModo('dia')">☀️ Sorte do Dia</button>
+<button class="sub-mode-btn" id="btnSubPorSorteio" onclick="mudarSubModo('sorteio')">⏰ Por Sorteio</button>
+</div>
+<div class="section-title">1. Selecione a Loteria</div>
+<div class="lottery-scroll" id="lotteryList"></div>
+<!-- SELEÇÃO DE HORÁRIO -->
+<div id="containerHorarios" style="display: none;">
+<div class="section-title">2. Selecione o Horário</div>
+<div class="horario-scroll" id="horarioList"></div>
+</div>
+<!-- AVISO DA FEDERAL NO POR SORTEIO -->
+<div class="notice-box" id="federalNotice" style="display: none;">
                 ℹ️ <strong>Loteria Federal:</strong> A extração ocorre exclusivamente às quartas-feiras e domingos. Por isso, os palpites indicados para esta modalidade estão centralizados e disponíveis no menu <strong>Sorte do Dia</strong>.
             </div>
-
-            <!-- CONTAINER DE JOGO E PALPITE -->
-            <div id="gameAndResultContainer">
-                <div class="section-title" id="titlePassoModalidade">2. Escolha o Tipo de Jogo</div>
-                <div class="modalidade-list" id="modalidadeList"></div>
-
-                <div class="section-title">Palpite Gerado</div>
-                <div class="palpite-box">
-                    <div class="palpite-title" id="selectedInfo">Selecione uma loteria e modalidade</div>
-                    <div class="palpite-value" id="palpiteResult">----</div>
-                    <div class="bicho-info" id="bichoResult">🐾 Aguardando seleção</div>
-                </div>
-            </div>
-
-            <a href="https://www.ojogodobicho.com/deu_no_poste.html" target="_blank" class="ext-link-btn">
+<!-- CONTAINER DE JOGO E PALPITE -->
+<div id="gameAndResultContainer">
+<div class="section-title" id="titlePassoModalidade">2. Escolha o Tipo de Jogo</div>
+<div class="modalidade-list" id="modalidadeList"></div>
+<div class="section-title">Palpite Gerado</div>
+<div class="palpite-box">
+<div class="palpite-title" id="selectedInfo">Selecione uma loteria e modalidade</div>
+<div class="palpite-value" id="palpiteResult">----</div>
+<div class="bicho-info" id="bichoResult">🐾 Aguardando seleção</div>
+</div>
+</div>
+<a class="ext-link-btn" href="https://www.ojogodobicho.com/deu_no_poste.html" target="_blank">
                 🌐 Ver Resultados Oficiais do Dia
             </a>
-        </div>
-
-        <!-- MODO 2: SUPER PALPITÃO -->
-        <div class="content" id="viewSuperPalpitao" style="display: none;">
-            <div class="sub-tab-container">
-                <button class="sub-tab-btn active" id="btnSuperMilhar" onclick="mostrarSuperList('milhar')">100 Milhares do Dia</button>
-                <button class="sub-tab-btn" id="btnSuperCentena" onclick="mostrarSuperList('centena')">50 Centenas do Dia</button>
-            </div>
-
-            <div class="section-title" id="superTitle">Lista Geral (Válida p/ Qualquer Loteria)</div>
-            <div class="super-grid" id="superGridContainer"></div>
-
-            <a href="https://www.ojogodobicho.com/deu_no_poste.html" target="_blank" class="ext-link-btn">
+</div>
+<!-- MODO 2: SUPER PALPITÃO -->
+<div class="content" id="viewSuperPalpitao" style="display: none;">
+<div class="sub-tab-container">
+<button class="sub-tab-btn active" id="btnSuperMilhar" onclick="mostrarSuperList('milhar')">100 Milhares do Dia</button>
+<button class="sub-tab-btn" id="btnSuperCentena" onclick="mostrarSuperList('centena')">50 Centenas do Dia</button>
+</div>
+<div class="section-title" id="superTitle">Lista Geral (Válida p/ Qualquer Loteria)</div>
+<div class="super-grid" id="superGridContainer"></div>
+<a class="ext-link-btn" href="https://www.ojogodobicho.com/deu_no_poste.html" target="_blank">
                 🌐 Ver Resultados Oficiais do Dia
             </a>
-        </div>
-
-        <footer>
+</div>
+<footer>
             Palpites gerados estatisticamente. Atualização diária e por sorteio.
         </footer>
-    </div><!-- /magoPanel -->
-
-    <!-- PAINEL ORÁCULO (COM O DESIGN IGUAL AO MAGO) -->
-    <div id="oraculoPanel" style="display:none;">
-        <header>
-            <h1>✨ Oráculo</h1>
-            <div class="timer-bar" id="oracleCycleLabel">⏳ Reset dos Palpites: <span id="oracle-reset-timer">00:00:00</span></div>
-        </header>
-
-        <div class="mode-switch">
-            <button class="mode-btn active" id="btnOracleModePorLoteria" onclick="mudarModoOracle('loteria')">🎯 Por Loteria</button>
-            <button class="mode-btn" id="btnOracleModeSuper" onclick="mudarModoOracle('super')">🚀 Super Palpitão</button>
-        </div>
-
-        <!-- MODO 1: POR LOTERIA (ORÁCULO) -->
-        <div class="content" id="oracleViewPorLoteria">
-            <div class="sub-mode-switch">
-                <button class="sub-mode-btn active" id="btnOracleSubSorteDia" onclick="mudarSubModoOracle('dia')">☀️ Sorte do Dia</button>
-                <button class="sub-mode-btn" id="btnOracleSubPorSorteio" onclick="mudarSubModoOracle('sorteio')">⏰ Por Sorteio</button>
-            </div>
-
-            <div class="section-title">1. Selecione a Loteria</div>
-            <div class="lottery-scroll" id="oracleLotteryList"></div>
-
-            <!-- SELEÇÃO DE HORÁRIO -->
-            <div id="oracleContainerHorarios" style="display: none;">
-                <div class="section-title">2. Selecione o Horário</div>
-                <div class="horario-scroll" id="oracleHorarioList"></div>
-            </div>
-
-            <!-- AVISO DA FEDERAL NO POR SORTEIO -->
-            <div class="notice-box" id="oracleFederalNotice" style="display: none;">
+</div><!-- /magoPanel -->
+<!-- PAINEL ORÁCULO (COM O DESIGN IGUAL AO MAGO) -->
+<div id="oraculoPanel" style="display:none;">
+<header>
+<h1>✨ Oráculo</h1>
+<div class="timer-bar" id="oracleCycleLabel">⏳ Reset dos Palpites: <span id="oracle-reset-timer">00:00:00</span></div>
+</header>
+<div class="mode-switch">
+<button class="mode-btn active" id="btnOracleModePorLoteria" onclick="mudarModoOracle('loteria')">🎯 Por Loteria</button>
+<button class="mode-btn" id="btnOracleModeSuper" onclick="mudarModoOracle('super')">🚀 Super Palpitão</button>
+</div>
+<!-- MODO 1: POR LOTERIA (ORÁCULO) -->
+<div class="content" id="oracleViewPorLoteria">
+<div class="sub-mode-switch">
+<button class="sub-mode-btn active" id="btnOracleSubSorteDia" onclick="mudarSubModoOracle('dia')">☀️ Sorte do Dia</button>
+<button class="sub-mode-btn" id="btnOracleSubPorSorteio" onclick="mudarSubModoOracle('sorteio')">⏰ Por Sorteio</button>
+</div>
+<div class="section-title">1. Selecione a Loteria</div>
+<div class="lottery-scroll" id="oracleLotteryList"></div>
+<!-- SELEÇÃO DE HORÁRIO -->
+<div id="oracleContainerHorarios" style="display: none;">
+<div class="section-title">2. Selecione o Horário</div>
+<div class="horario-scroll" id="oracleHorarioList"></div>
+</div>
+<!-- AVISO DA FEDERAL NO POR SORTEIO -->
+<div class="notice-box" id="oracleFederalNotice" style="display: none;">
                 ℹ️ <strong>Loteria Federal:</strong> A extração ocorre exclusivamente às quartas-feiras e domingos. Por isso, os palpites indicados para esta modalidade estão centralizados e disponíveis no menu <strong>Sorte do Dia</strong>.
             </div>
-
-            <!-- CONTAINER DE JOGO E PALPITE -->
-            <div id="oracleGameAndResultContainer">
-                <div class="section-title" id="oracleTitlePassoModalidade">2. Escolha o Tipo de Jogo</div>
-                <div class="modalidade-list" id="oracleModalidadeList"></div>
-
-                <div class="section-title">Palpite Gerado (Estatístico)</div>
-                <div class="palpite-box">
-                    <div class="palpite-title" id="oracleSelectedInfo">Selecione uma loteria e modalidade</div>
-                    <div class="palpite-value" id="oraclePalpiteResult">----</div>
-                    <div class="bicho-info" id="oracleBichoResult">🐾 Aguardando seleção</div>
-                </div>
-            </div>
-
-            <!-- O diagnóstico técnico continua existindo no DOM para depuração,
+<!-- CONTAINER DE JOGO E PALPITE -->
+<div id="oracleGameAndResultContainer">
+<div class="section-title" id="oracleTitlePassoModalidade">2. Escolha o Tipo de Jogo</div>
+<div class="modalidade-list" id="oracleModalidadeList"></div>
+<div class="section-title">Palpite Gerado (Estatístico)</div>
+<div class="palpite-box">
+<div class="palpite-title" id="oracleSelectedInfo">Selecione uma loteria e modalidade</div>
+<div class="palpite-value" id="oraclePalpiteResult">----</div>
+<div class="bicho-info" id="oracleBichoResult">🐾 Aguardando seleção</div>
+</div>
+</div>
+<!-- O diagnóstico técnico continua existindo no DOM para depuração,
                  mas fica oculto para não poluir a tela do usuário. -->
-            <div id="oraclePickStatus" class="oracle-status oracle-debug-status" aria-hidden="true">Selecione a banca para calcular.</div>
-
-            <!-- Área visual do motor do Oráculo -->
-            <div class="oracle-engine-card" id="oracleEngineCard">
-                <div class="oracle-engine-orb" aria-hidden="true">
-                    <span></span><span></span><span></span>
-                    <div class="oracle-engine-core">✦</div>
-                </div>
-                <div class="oracle-engine-copy">
-                    <div class="oracle-engine-title">✨ ORÁCULO EM SINTONIA</div>
-                    <div class="oracle-engine-text" id="oracleEngineText">
+<div aria-hidden="true" class="oracle-status oracle-debug-status" id="oraclePickStatus">Selecione a banca para calcular.</div>
+<!-- Área visual do motor do Oráculo -->
+<div class="oracle-engine-card" id="oracleEngineCard">
+<div aria-hidden="true" class="oracle-engine-orb">
+<span></span><span></span><span></span>
+<div class="oracle-engine-core">✦</div>
+</div>
+<div class="oracle-engine-copy">
+<div class="oracle-engine-title">✨ ORÁCULO EM SINTONIA</div>
+<div class="oracle-engine-text" id="oracleEngineText">
                         Cruzando histórico, padrões, atrasos e transições para encontrar combinações alternativas.
                     </div>
-                    <div class="oracle-engine-scan" aria-hidden="true">
-                        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
-                    </div>
-                </div>
-            </div>
-
-            <div id="oracleStats" class="oracle-stats"></div>
-
-            <div class="notice-box" style="text-align:left; font-size: 0.75rem;">
-                <strong>Consulta de Resultados Anteriores:</strong>
-                <div style="margin-top:8px; display:flex; gap:8px;">
-                    <input id="oracleDate" type="date" class="oracle-input" style="margin:0;">
-                    <button onclick="loadOracleResults()" class="sub-mode-btn active" style="white-space:nowrap; padding:0 12px;">📋 Consultar</button>
-                </div>
-            </div>
-
-            <div id="oracleStatus" class="oracle-status">Toque em “Consultar” para obter resultados da banca e data selecionadas.</div>
-            <div id="oracleResults" class="oracle-results"></div>
-
-            <div class="oracle-footnote">
+<div aria-hidden="true" class="oracle-engine-scan">
+<i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+</div>
+</div>
+</div>
+<div class="oracle-stats" id="oracleStats"></div>
+<div class="notice-box" style="text-align:left; font-size: 0.75rem;">
+<strong>Consulta de Resultados Anteriores:</strong>
+<div style="margin-top:8px; display:flex; gap:8px;">
+<input class="oracle-input" id="oracleDate" style="margin:0;" type="date"/>
+<button class="sub-mode-btn active" onclick="loadOracleResults()" style="white-space:nowrap; padding:0 12px;">📋 Consultar</button>
+</div>
+</div>
+<div class="oracle-status" id="oracleStatus">Toque em “Consultar” para obter resultados da banca e data selecionadas.</div>
+<div class="oracle-results" id="oracleResults"></div>
+<div class="oracle-footnote">
                 A consulta pode depender da disponibilidade e do formato da fonte externa. Rio, Para Todos-SP e Nacional consultam suas fontes e arquivos históricos; LOOK Goiás usa sua integração própria. Confira os resultados na fonte original. Nenhum método estatístico consegue prever com certeza resultados futuros.
             </div>
-        </div>
-
-        <!-- MODO 2: SUPER PALPITÃO / PALPITÃO 20 DEZENAS (ORÁCULO) -->
-        <div class="content" id="oracleViewSuperPalpitao" style="display: none;">
-            <div class="section-title">Super Palpitão · 100 Milhares / 50 Centenas</div>
-            <div class="sub-mode-switch" style="margin-bottom:12px;">
-                <button class="sub-mode-btn active" id="oracleSuperBtnMilhar" onclick="setOracleSuperType('milhar')">🔢 100 Milhares</button>
-                <button class="sub-mode-btn" id="oracleSuperBtnCentena" onclick="setOracleSuperType('centena')">🎯 50 Centenas</button>
-            </div>
-            <div class="palpite-box">
-                <div class="palpite-title" id="oracleSuperSelectedInfo">100 Milhares — Sorte do Dia</div>
-                <div class="palpite-value" id="oracleSuperPalpiteResult" style="font-size: 1rem;">Aguardando cálculo</div>
-                <div class="bicho-info" id="oracleSuperDescription">Ordenado por frequência histórica, posição dos dígitos, pares e recência.</div>
-            </div>
-            <div class="section-title" id="oracleSuperGridTitle">100 milhares selecionadas</div>
-            <div class="super-grid" id="oracleSuperGridContainer"></div>
-        </div>
-
-        <footer>
+</div>
+<!-- MODO 2: SUPER PALPITÃO / PALPITÃO 20 DEZENAS (ORÁCULO) -->
+<div class="content" id="oracleViewSuperPalpitao" style="display: none;">
+<div class="section-title">Super Palpitão · 100 Milhares / 50 Centenas</div>
+<div class="sub-mode-switch" style="margin-bottom:12px;">
+<button class="sub-mode-btn active" id="oracleSuperBtnMilhar" onclick="setOracleSuperType('milhar')">🔢 100 Milhares</button>
+<button class="sub-mode-btn" id="oracleSuperBtnCentena" onclick="setOracleSuperType('centena')">🎯 50 Centenas</button>
+</div>
+<div class="palpite-box">
+<div class="palpite-title" id="oracleSuperSelectedInfo">100 Milhares — Sorte do Dia</div>
+<div class="palpite-value" id="oracleSuperPalpiteResult" style="font-size: 1rem;">Aguardando cálculo</div>
+<div class="bicho-info" id="oracleSuperDescription">Ordenado por frequência histórica, posição dos dígitos, pares e recência.</div>
+</div>
+<div class="section-title" id="oracleSuperGridTitle">100 milhares selecionadas</div>
+<div class="super-grid" id="oracleSuperGridContainer"></div>
+</div>
+<footer>
             Palpites recalculados com resultados disponíveis; histórico não garante resultados futuros.
         </footer>
-    </div><!-- /oraculoPanel -->
+</div><!-- /oraculoPanel -->
 </div>
-
 <script>
     /* =========================================================================
        1. CÓDIGO DO MAGO (INALTERADO)
@@ -4949,7 +4912,6 @@ function renderOracleModalidades(){
         iniciarTimerReset();
     };
 </script>
-
 <script id="opening-screen-script">
 (function(){
     function revealApp(){
@@ -4980,17 +4942,12 @@ function renderOracleModalidades(){
     });
 })();
 </script>
-
-
-
 <style id="oraculo-final-style">
 #oraculoPanel .oracle-debug-status,#oraculoPanel #oracleStats{display:none!important}
 #oraculoPanel .final-oracle-engine{margin-top:12px}
 #oraculoPanel .engine-waiting{filter:saturate(.72);opacity:.92}
 #oraculoPanel .oracle-engine-card{border-radius:18px;overflow:hidden}
 </style>
-
-
 <style id="oraculo-final-polish">
 #oraculoPanel .modalidade-list{
   max-height:240px;
@@ -5034,9 +4991,6 @@ function renderOracleModalidades(){
   flex:0 0 auto;
 }
 </style>
-
-
-
 <style id="oraculo-v12-polish">
 #oraculoPanel .modalidade-list{
   max-height:430px;
@@ -6059,8 +6013,6 @@ function renderOracleModalidades(){
   window.addEventListener('load',()=>setTimeout(init,30),{once:true});
 })();
 </script>
-
-
 <script id="oraculo-v15-defensive-fix">
 (function(){
   'use strict';
@@ -6073,8 +6025,6 @@ function renderOracleModalidades(){
   }catch(_){ }
 })();
 </script>
-
-
 <script id="oraculo-v21-repeat-safety">
 (function(){
   'use strict';
@@ -6087,8 +6037,6 @@ function renderOracleModalidades(){
   }catch(_){}
 })();
 </script>
-
-
 <script id="oraculo-v22-smart-repeat">
 /* Oráculo V22 — repetição tratada como evidência estatística, nunca como regra de cópia.
    PRINCÍPIOS:
@@ -6303,8 +6251,6 @@ function renderOracleModalidades(){
   root.OraculoV22={repeatModel,candidateRepeatInfo,repeatPenalty};
 })(typeof window!=='undefined'?window:globalThis);
 </script>
-
-
 <script id="oraculo-v24-snapshot-reset">
 (function(){
   'use strict';
@@ -6324,7 +6270,6 @@ function renderOracleModalidades(){
   }catch(_){}
 })();
 </script>
-
 <script id="oraculo-v26-hierarchical-engine">
 /* Oráculo V30 — motor hierárquico único (correção de repetição do sorteio anterior).
    Ordem da análise:
@@ -6600,7 +6545,6 @@ function renderOracleModalidades(){
   }catch(_){}
 })(typeof window!=='undefined'?window:globalThis);
 </script>
-
 <script id="oraculo-v26-ui-hotfix">
 (function(){
   'use strict';
@@ -7103,7 +7047,6 @@ function renderOracleModalidades(){
 
 })(typeof window!=='undefined'?window:globalThis);
 </script>
-
 <style id="oraculo-v31-loading-style">
 #oraculoPanel .oracle-engine-card.oracle-v31-thinking .oracle-engine-text{
   animation:oracleV31Pulse 1.15s ease-in-out infinite;
@@ -7122,49 +7065,54 @@ function renderOracleModalidades(){
 @keyframes oracleV31Scan{0%,100%{opacity:.28;transform:scaleX(.72)}50%{opacity:1;transform:scaleX(1)}}
 </style>
 
-<script id="oraculo-v31-loading-ui">
-(function(){
+<script id="oraculo-v32-interaction-fix">(function(){
   'use strict';
-  if(window.__oraculoV31LoadingInstalled)return;
-  window.__oraculoV31LoadingInstalled=true;
-  let timer=0;
-  let seq=0;
-  function show(){
+  // V32: nunca atrasar o clique do usuário. O carregamento visual acompanha a
+  // geração, mas a ação do botão é executada imediatamente.
+  if(window.__oraculoV32Installed) return;
+  window.__oraculoV32Installed=true;
+
+  function showThinking(){
     const card=document.getElementById('oracleEngineCard');
-    if(card)card.classList.add('oracle-v31-thinking');
+    if(card) card.classList.add('oracle-v31-thinking');
     const t=document.getElementById('oracleEngineText');
-    if(t)t.textContent='🔮 Criando e conferindo combinações com as estatísticas...';
+    if(t) t.textContent='🔮 Criando e conferindo combinações com as estatísticas...';
     const p=document.getElementById('oraclePalpiteResult');
-    if(p)p.textContent='••••';
+    if(p) p.textContent='••••';
     const b=document.getElementById('oracleBichoResult');
-    if(b)b.textContent='⏳ O Oráculo está calculando os candidatos...';
+    if(b) b.textContent='⏳ O Oráculo está calculando os candidatos...';
   }
-  function cancelAndRun(fn,args,delay){
-    const my=++seq;
-    if(timer)clearTimeout(timer);
-    show();
-    timer=setTimeout(()=>{if(my!==seq)return;fn.apply(window,args||[]);},delay);
-  }
-  function wrap(name,delay){
+
+  function wrapImmediate(name){
     const fn=window[name];
-    if(typeof fn!=='function'||fn.__v31Wrapped)return;
-    const w=function(...args){cancelAndRun(fn,args,delay);};
-    w.__v31Wrapped=true;
+    if(typeof fn!=='function' || fn.__v32ImmediateWrapped) return;
+    const w=function(...args){
+      showThinking();
+      return fn.apply(this,args);
+    };
+    w.__v32ImmediateWrapped=true;
     window[name]=w;
   }
-  function install(){
-    wrap('oraculoV14SelectLottery',850);
-    wrap('oraculoV14SelectTime',950);
-    wrap('oraculoV14SelectModality',900);
-    wrap('mudarSubModoOracle',900);
-    wrap('mudarModoOracle',1050);
-    wrap('setOracleSuperType',1100);
-    wrap('generateOraclePicks',900);
-  }
-  window.addEventListener('load',()=>setTimeout(install,220));
-  document.addEventListener('click',()=>setTimeout(install,20),{passive:true});
-})();
-</script>
 
-</body>
+  function install(){
+    // Só geração/ações do Oráculo. Nada de setTimeout no clique.
+    ['mudarModoOracle','mudarSubModoOracle','setOracleSuperType','generateOraclePicks'].forEach(wrapImmediate);
+  }
+
+  // Garante que a tela de entrada não continue bloqueando o app depois de fechada.
+  function unlockSafety(){
+    const screen=document.getElementById('openingScreen');
+    if(!screen || screen.classList.contains('closing') || screen.dataset.opened==='1'){
+      document.body.classList.remove('app-locked');
+    }
+  }
+
+  window.addEventListener('load',()=>{
+    setTimeout(install,40);
+    setTimeout(unlockSafety,1400);
+  },{once:true});
+
+  document.addEventListener('click',()=>setTimeout(install,0),{passive:true});
+})();
+</script></body>
 </html>
