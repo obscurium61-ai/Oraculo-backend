@@ -3514,7 +3514,7 @@ function generateOraclePicks(){
    • V15 não lê nem reutiliza memórias/snapshots de V13/V14.
    ====================================================================== */
 
-const ORACLE_V15_NS = 'ORACULO_V18';
+const ORACLE_V15_NS = 'ORACULO_V20';
 
 function oracleV15SPNow(){
     const s = new Date().toLocaleString('en-US',{timeZone:'America/Sao_Paulo'});
@@ -3686,6 +3686,10 @@ function calculateOracleStats(rows,referenceDate=oracleTodayISO()){
     const gapTail=Array(100).fill(null), gapGroup=Array(26).fill(null);
     const weekdayGroup=Array.from({length:7},()=>Array(26).fill(0));
     const sourceDigit={};
+    // Última aparição da milhar completa e histórico de repetição por idade.
+    // Esse sinal serve para modular a pontuação, não para banir a milhar.
+    const exactLastDate={};
+    const exactDates=new Map();
     const refMs=Date.parse(`${referenceDate}T12:00:00Z`);
 
     const touchSource=(s)=>{
@@ -3719,6 +3723,9 @@ function calculateOracleStats(rows,referenceDate=oracleTodayISO()){
         exactFreq[4][Number(n)]++;
         exactFreq[3][Number(n.slice(-3))]++;
         exactFreq[2][tail]++;
+        exactLastDate[n]=r.date;
+        if(!exactDates.has(n)) exactDates.set(n,new Set());
+        exactDates.get(n).add(r.date);
         sourceExact[r.sourceLottery][4][Number(n)]++;
         sourceExact[r.sourceLottery][3][Number(n.slice(-3))]++;
         sourceExact[r.sourceLottery][2][tail]++;
@@ -3758,6 +3765,37 @@ function calculateOracleStats(rows,referenceDate=oracleTodayISO()){
         gapGroup[g]=li===null ? ordered.length : (ordered.length-1-li);
     }
 
+    // Taxa empírica de repetição da mesma milhar completa depois de N dias.
+    // Só contamos uma ocorrência como "elegível" quando a janela futura inteira
+    // já cabe até a data de referência.
+    const exactRepeatHitsByAge=Array(8).fill(0);
+    const exactRepeatEligibleByAge=Array(8).fill(0);
+    const toDay=(iso)=>{
+        const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        return m?Date.UTC(Number(m[1]),Number(m[2])-1,Number(m[3])):NaN;
+    };
+    const addDays=(iso,days)=>{
+        const ms=toDay(iso);
+        if(Number.isNaN(ms)) return null;
+        return new Date(ms+days*86400000).toISOString().slice(0,10);
+    };
+    for(const datesSet of exactDates.values()){
+        const dates=[...datesSet].sort();
+        for(const d of dates){
+            for(let age=1;age<=7;age++){
+                const target=addDays(d,age);
+                if(!target || toDay(target)>refMs) continue;
+                exactRepeatEligibleByAge[age]++;
+                if(datesSet.has(target)) exactRepeatHitsByAge[age]++;
+            }
+        }
+    }
+    const exactRepeatRateByAge=exactRepeatHitsByAge.map((hits,age)=>{
+        if(age===0) return 0;
+        const eligible=exactRepeatEligibleByAge[age]||0;
+        return eligible?hits/eligible:0;
+    });
+
     const weighted=Array.from({length:100},(_,n)=>{
         const recent=recentTail[0][n]*0.60+recentTail[1][n]*0.28+recentTail[2][n]*0.12;
         const overdue=oracleV15Clamp(gapTail[n]/Math.max(3,ordered.length));
@@ -3770,7 +3808,8 @@ function calculateOracleStats(rows,referenceDate=oracleTodayISO()){
         total:ordered.length, ordered, draws, lastDraw,
         freq:freqTail, lastSeen:lastTail, recentTail, prizeTail,
         groupFreq,groupRecent,groupLast,gapTail,gapGroup,
-        digitFreq,exactFreq,sourceTail,sourceGroup,sourceExact,sourceTotals,sourceDigit,
+        digitFreq,exactFreq,exactLastDate,exactRepeatHitsByAge,exactRepeatEligibleByAge,exactRepeatRateByAge,
+        sourceTail,sourceGroup,sourceExact,sourceTotals,sourceDigit,
         tailTransition,groupTransition,prize1Group,prize1Tail,weekdayGroup,
         lastDrawTailSet,lastDrawGroupCounts,tailPairShape,weighted,
         referenceDate
@@ -3824,6 +3863,31 @@ function oracleV15CandidateScore(value,length,stats,contextKey,profile='palpitao
     const exactKey=Number(n.slice(-length));
     const exactCount=stats.exactFreq[length]?.[exactKey]||0;
     const exact=oracleV15LogNorm(exactCount,maxFull);
+
+    // Repetição exata recente da mesma milhar:
+    // hoje/ontem será bloqueada pelo V20; de 2 a 7 dias recebe apenas
+    // uma penalidade suave. Assim a milhar ainda pode voltar quando o restante
+    // das estatísticas realmente justificar isso.
+    let exactRecentPenalty=0;
+    if(length===4){
+        const lastExactDate=stats.exactLastDate?.[n];
+        if(lastExactDate){
+            const lastMs=Date.parse(`${lastExactDate}T12:00:00Z`);
+            const refMs=Date.parse(`${referenceDate}T12:00:00Z`);
+            const age=Math.round((refMs-lastMs)/86400000);
+            if(age===0 || age===1){
+                exactRecentPenalty=1.35;
+            }else if(age>=2 && age<=7){
+                const ageBase={2:0.55,3:0.43,4:0.32,5:0.23,6:0.16,7:0.10}[age]||0;
+                const empiricalRate=Number(stats.exactRepeatRateByAge?.[age]||0);
+                // Repetições historicamente raras recebem um pequeno reforço
+                // da penalidade; isso nunca transforma a regra em proibição.
+                const rarityFactor=1+Math.min(0.45,Math.max(0,(0.03-empiricalRate)*6));
+                exactRecentPenalty=ageBase*rarityFactor;
+            }
+        }
+    }
+
     const maxTail=Math.max(1,...stats.freq);
     const tailHot=oracleV15LogNorm(stats.freq[tail]||0,maxTail);
     const recent=(stats.recentTail?.[0]?.[tail]||0)*0.58+(stats.recentTail?.[1]?.[tail]||0)*0.27+(stats.recentTail?.[2]?.[tail]||0)*0.15;
@@ -3935,7 +3999,7 @@ function oracleV15CandidateScore(value,length,stats,contextKey,profile='palpitao
         p.calendar*calendarScore +
         p.prize*prizeScore +
         special*0.16 +
-        noise - blockedPenalty;
+        noise - blockedPenalty - exactRecentPenalty;
 
     return score;
 }
@@ -5960,19 +6024,16 @@ function renderOracleModalidades(){
 </script>
 
 
-<script id="oraculo-v19-recent-repeat">
-/* Oráculo V19 — proteção inteligente contra repetição recente.
-   IMPORTANTE:
-   - Não bloqueia números que saíram há semanas/meses.
-   - Milhares saídas hoje (antes do horário-alvo) ou ontem ficam bloqueadas.
-   - A partir de 2 dias completos para trás, a milhar volta a poder concorrer.
-   - O histórico completo continua sendo usado pelas estatísticas; esta regra
-     afeta APENAS a seleção final da Milhar.
+<script id="oraculo-v20-recent-repeat">
+/* Oráculo V20 — repetição recente baseada em estatística.
+   - Hoje e ontem: repetição exata da milhar fica bloqueada.
+   - 2 a 7 dias: não bloqueia; aplica uma penalidade suave ao score.
+   - 8+ dias: nenhuma penalidade por repetição exata.
 */
 (function(){
   'use strict';
   const E=window.OraculoV13;
-  if(!E || typeof E.buildPortfolio!=='function' || E.__v19RecentRepeatWrapped) return;
+  if(!E || typeof E.buildPortfolio!=='function' || E.__v20RecentRepeatWrapped) return;
 
   function normalize4(value){
     const n=String(value??'').replace(/\D/g,'').slice(-4).padStart(4,'0');
@@ -5989,10 +6050,7 @@ function renderOracleModalidades(){
     return d.toISOString().slice(0,10);
   }
 
-  // Apenas hoje + ontem. Assim:
-  //  - saiu mais cedo hoje -> não repete;
-  //  - saiu ontem -> não repete;
-  //  - saiu há 2+ dias -> pode voltar normalmente.
+  // Exclusão dura somente para resultados de hoje e de ontem.
   function recentHardMilharSet(stats, previousRows){
     const reference=isoDate(stats?.referenceDate) || isoDate(previousRows?.[0]?.date);
     if(!reference) return new Set();
@@ -6018,12 +6076,10 @@ function renderOracleModalidades(){
     merged.milhar=[...new Set([...existing,...hard])];
     return originalBuildPortfolio.call(this, stats, baseContext, options, merged);
   };
+  E.__v20RecentRepeatWrapped=true;
 
-  E.__v19RecentRepeatWrapped=true;
-
-  // Não reutilizar snapshots antigos das versões que tinham a regra global de
-  // exclusão. O histórico estatístico continua intacto; só os palpites congelados
-  // precisam ser recalculados uma vez sob a regra V19.
+  // Recalcula uma vez sob o namespace V20 para não reaproveitar snapshots
+  // congelados sob as regras anteriores de repetição.
   try{
     const prefixes=[
       'ORACULO_V16|','ORACULO_FINAL_V12|','ORACULO_FINAL_V13|','ORACULO_FINAL_V14|',
@@ -6036,7 +6092,7 @@ function renderOracleModalidades(){
       if(prefixes.some(prefix=>k.startsWith(prefix)) || k.startsWith('ORACULO_V13_SNAPSHOT|')) remove.push(k);
     }
     remove.forEach(k=>localStorage.removeItem(k));
-  }catch(_){ }
+  }catch(_){}
 })();
 </script>
 
