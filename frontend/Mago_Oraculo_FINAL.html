@@ -6830,5 +6830,300 @@ function renderOracleModalidades(){
   document.addEventListener('click',()=>setTimeout(sync,0),{passive:true});
 })();
 </script>
+<script id="oraculo-v27-stability-patch">
+(function(root){
+  'use strict';
+  const E=root.OraculoV13;
+  if(!E || E.__v27StabilityPatch) return;
+
+  const NS='ORACULO_V27|';
+  const PTSP={
+    id:'paratodos_sp', api:'Para Todos-SP', name:'Para Todos - SP',
+    times:['08:20','10:20','12:20','13:20','15:20','17:20','19:20','20:20']
+  };
+  const PTSP_SOURCE_OFFSET=-20;
+  const ptspState={time:PTSP.times[0],modality:'milhar',busy:false,request:0,cache:new Map()};
+
+  const pad=(v,n)=>String(v??'').replace(/\D/g,'').slice(-n).padStart(n,'0');
+  const isoToday=()=>{
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const m=Object.fromEntries(parts.map(p=>[p.type,p.value]));
+    return `${m.year}-${m.month}-${m.day}`;
+  };
+  const shiftDate=(iso,days)=>E.shiftDate(iso,days);
+  const minutes=(t)=>{const m=String(t||'').match(/^(\d{2}):(\d{2})$/);return m?Number(m[1])*60+Number(m[2]):null;};
+  const sourceTime=(ui)=>{const m=minutes(ui);if(m==null)return ui;const x=(m+PTSP_SOURCE_OFFSET+1440)%1440;return `${String(Math.floor(x/60)).padStart(2,'0')}:${String(x%60).padStart(2,'0')}`;};
+  const esc=(v)=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const arr=(v)=>Array.isArray(v)?v:(v==null?[]:[v]);
+
+  function purgeLegacy(){
+    try{
+      const prefixes=['ORACULO_V26|','ORACULO_V25|','ORACULO_V24|','ORACULO_V23|','ORACULO_V22|','ORACULO_V21|','ORACULO_V20|','ORACULO_V19|','ORACULO_V18|','ORACULO_V17|','ORACULO_V16|','ORACULO_PTSP_FIX_V17|'];
+      for(let i=localStorage.length-1;i>=0;i--){
+        const k=localStorage.key(i)||'';
+        if(prefixes.some(p=>k.startsWith(p))) localStorage.removeItem(k);
+      }
+      localStorage.setItem('ORACULO_V27_MIGRATED','1');
+    }catch(_){ }
+  }
+
+  // -------------------------
+  // Repetição: sinal estatístico, não bloqueio.
+  // -------------------------
+  function recentMap(stats,length){
+    const out=new Map();
+    const ref=String(stats?.referenceDate||'');
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(ref)) return out;
+    const refMs=Date.parse(ref+'T12:00:00Z');
+    for(const r of (stats?.ordered||[])){
+      const d=String(r?.date||'');
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+      const ms=Date.parse(d+'T12:00:00Z');
+      if(!Number.isFinite(ms)||ms>refMs) continue;
+      const age=Math.round((refMs-ms)/86400000);
+      if(age>7) continue;
+      const n=pad(r?.number,Math.min(4,length));
+      const prize=Number(r?.prize||99);
+      const prev=out.get(n)||{age:99,count:0,firstPrize:false,bestPrize:99};
+      prev.count++;
+      prev.age=Math.min(prev.age,age);
+      prev.bestPrize=Math.min(prev.bestPrize,prize);
+      if(prize===1) prev.firstPrize=true;
+      out.set(n,prev);
+    }
+    return out;
+  }
+
+  function repeatPenalty(info,length){
+    if(!info) return 0;
+    let p=0;
+    if(info.age===0) p += length===4?0.085:length===3?0.055:0.020;
+    else if(info.age===1) p += length===4?0.060:length===3?0.038:0.014;
+    else if(info.age===2) p += length===4?0.030:length===3?0.019:0.007;
+    else if(info.age===3) p += length===4?0.014:length===3?0.010:0.004;
+    else if(info.age<=7) p += length===4?0.006:length===3?0.004:0.002;
+    if(info.firstPrize){
+      p += length===4?0.035:length===3?0.016:0.006;
+    }
+    // If there were multiple occurrences recently, the event is less surprising;
+    // we slightly reduce the penalty rather than treating repetition as impossible.
+    if(info.count>=2) p *= 0.82;
+    return p;
+  }
+
+  function softenRank(list,stats,length){
+    if(!Array.isArray(list)||!list.length) return list;
+    const recent=recentMap(stats,length);
+    const scored=list.map(c=>{
+      const n=pad(c?.number,length);
+      const p=repeatPenalty(recent.get(n),length);
+      return {...c,number:n,score:(Number(c?.score)||0)-p,_v27Repeat:recent.get(n)||null,_v27RepeatPenalty:p};
+    });
+    scored.sort((a,b)=>Number(b.score||0)-Number(a.score||0)||Number(b.tie||0)-Number(a.tie||0));
+    return scored;
+  }
+
+  const baseRank=E.rankCandidates;
+  E.rankCandidates=function(length,stats,options={},context='',limit=1000){
+    const ranked=baseRank.call(this,length,stats,options,context,Math.max(limit,50));
+    return softenRank(ranked,stats,length).slice(0,Math.max(limit,50));
+  };
+
+  function chooseAlternative(current,ranking,stats,length){
+    if(!Array.isArray(ranking)||!ranking.length) return current;
+    const recent=recentMap(stats,length);
+    const cur=pad(current,length);
+    const info=recent.get(cur);
+    if(!info) return cur;
+    const curObj=ranking.find(x=>pad(x?.number,length)===cur);
+    const curScore=Number(curObj?.score ?? -Infinity);
+    const threshold=length===4?0.965:length===3?0.975:0.990;
+    for(const candidate of ranking.slice(0,40)){
+      const n=pad(candidate?.number,length);
+      if(n===cur) continue;
+      if(recent.has(n)) continue;
+      const sc=Number(candidate?.score ?? -Infinity);
+      if(!Number.isFinite(curScore) || sc>=curScore*threshold || sc>curScore-0.02) return n;
+    }
+    return cur;
+  }
+
+  const baseBuild=E.buildPortfolio;
+  E.buildPortfolio=function(stats,context,options={},avoid={}){
+    const pack=baseBuild.call(this,stats,context,options,avoid);
+    if(!pack||!stats) return pack;
+    if(Array.isArray(pack.milhar)&&pack.milhar.length&&Array.isArray(pack.ranking?.milhar)){
+      pack.milhar=[chooseAlternative(pack.milhar[0],pack.ranking.milhar,stats,4)];
+    }
+    if(Array.isArray(pack.centena)&&pack.centena.length&&Array.isArray(pack.ranking?.centena)){
+      pack.centena=[chooseAlternative(pack.centena[0],pack.ranking.centena,stats,3)];
+    }
+    if(Array.isArray(pack.dezena)&&pack.dezena.length&&Array.isArray(pack.ranking?.dezena)){
+      pack.dezena=[chooseAlternative(pack.dezena[0],pack.ranking.dezena,stats,2)];
+    }
+    return pack;
+  };
+
+  // -------------------------
+  // Para Todos-SP: Por Sorteio robusto.
+  // A fonte publica 08:00/10:00/... enquanto a UI usa 08:20/10:20/....
+  // -------------------------
+  function apiBase(){
+    return (location.protocol==='http:'||location.protocol==='https:')&&location.hostname
+      ? location.origin : 'https://oraculo-backend-mor3.onrender.com';
+  }
+  async function fetchPTSPHistory(start,end){
+    const key=`H|${start}|${end}`;
+    if(ptspState.cache.has(key)) return ptspState.cache.get(key);
+    const res=await fetch(`${apiBase()}/api/oracle/history?${new URLSearchParams({lottery:PTSP.api,start_date:start,end_date:end})}`,{cache:'no-store',headers:{Accept:'application/json'}});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data?.detail?.message||data?.detail||data?.error||`HTTP ${res.status}`);
+    const rows=E.normalizeRows(data.rows||[]);
+    ptspState.cache.set(key,rows); return rows;
+  }
+  function resolveDraw(rows,date,uiTime){
+    const pref=sourceTime(uiTime), alt=uiTime;
+    const candidates=rows.filter(r=>r.date===date && minutes(r.time)!=null);
+    const exactPref=candidates.filter(r=>r.time===pref);
+    if(exactPref.length) return {time:pref,rows:exactPref.sort((a,b)=>a.prize-b.prize)};
+    const exactAlt=candidates.filter(r=>r.time===alt);
+    if(exactAlt.length) return {time:alt,rows:exactAlt.sort((a,b)=>a.prize-b.prize)};
+    const target=minutes(pref);
+    const groups=new Map();
+    for(const r of candidates){
+      const delta=Math.abs((minutes(r.time)||0)-target);
+      if(delta<=35){if(!groups.has(r.time))groups.set(r.time,[]);groups.get(r.time).push(r);}
+    }
+    const best=[...groups.entries()].sort((a,b)=>{
+      const da=Math.abs((minutes(a[0])||0)-target), db=Math.abs((minutes(b[0])||0)-target); return da-db;
+    })[0];
+    return best?{time:best[0],rows:best[1].sort((a,b)=>a.prize-b.prize)}:{time:pref,rows:[]};
+  }
+  function beforeCutoff(rows,date,cutoffTime){
+    const c=minutes(cutoffTime);
+    return rows.filter(r=>r.date<date || (r.date===date && c!=null && minutes(r.time)!=null && minutes(r.time)<c));
+  }
+  function activePTSP(){
+    const b=[...document.querySelectorAll('#oracleLotteryList .lottery-btn')].find(x=>String(x.textContent||'').trim()==='Para Todos - SP');
+    return !!b?.classList.contains('active');
+  }
+  function isSortMode(){return document.getElementById('btnOracleSubPorSorteio')?.classList.contains('active');}
+  function renderPTSPHours(){
+    const wrap=document.getElementById('oracleContainerHorarios'),host=document.getElementById('oracleHorarioList');
+    if(!wrap||!host)return;
+    wrap.style.display='block';
+    host.innerHTML=PTSP.times.map(t=>`<button type="button" class="horario-btn ${t===ptspState.time?'active':''}">${t}</button>`).join('');
+    host.querySelectorAll('.horario-btn').forEach(btn=>btn.addEventListener('click',()=>{ptspState.time=btn.textContent.trim();renderPTSPHours();computePTSP();}));
+  }
+  function renderPTSPMods(){
+    const host=document.getElementById('oracleModalidadeList'); if(!host)return;
+    const names=[
+      ['milhar','Milhar','9700x'],['palpitao','Palpitão (20 Dezenas)','960x'],['centena','Centena','970x'],['dezena','Dezena','97x'],
+      ['grupo','Grupo','24x'],['duque_dezena','Duque de Dezena','300x'],['terno_dezena','Terno de Dezena','15000x'],['duque_grupo','Duque de Grupo','200x'],['terno_grupo','Terno de Grupo','1500x'],['passe_vai','Passe Vai','110x']
+    ];
+    host.innerHTML=names.map(([id,n,m])=>`<button type="button" class="modalidade-btn ${id===ptspState.modality?'active':''}"><span>${esc(n)}</span><strong>${m}</strong></button>`).join('');
+    host.querySelectorAll('.modalidade-btn').forEach((btn,i)=>btn.addEventListener('click',()=>{ptspState.modality=names[i][0];renderPTSPMods();computePTSP();}));
+  }
+  function syncPTSPUi(){
+    document.querySelectorAll('#oracleLotteryList .lottery-btn').forEach(b=>b.classList.toggle('active',String(b.textContent||'').trim()==='Para Todos - SP'));
+    document.getElementById('btnOracleSubSorteDia')?.classList.remove('active');
+    document.getElementById('btnOracleSubPorSorteio')?.classList.add('active');
+    renderPTSPHours(); renderPTSPMods();
+  }
+  function renderPTSPValue(portfolio,stats){
+    const groupMods=['grupo','duque_grupo','terno_grupo','passe_vai'];
+    const vals=arr(portfolio?.[ptspState.modality]);
+    const text=groupMods.includes(ptspState.modality)
+      ? vals.map(g=>`Grupo ${String(g).padStart(2,'0')}`).join(' · ')
+      : vals.map(String).join(' · ');
+    const bicho=vals.slice(0,6).map(n=>{
+      const b=E.bicho(E.groupFromTail(String(n).padStart(4,'0').slice(-2)));return `🐾 ${b.name} · Grupo ${String(b.group).padStart(2,'0')}`;
+    }).join(' · ');
+    document.getElementById('oracleSelectedInfo')?.replaceChildren(document.createTextNode(`Para Todos - SP · Sorteio ${ptspState.time} · ${({palpitao:'Palpitão (20 Dezenas)',duque_dezena:'Duque de Dezena',terno_dezena:'Terno de Dezena',grupo:'Grupo',duque_grupo:'Duque de Grupo',terno_grupo:'Terno de Grupo',passe_vai:'Passe Vai'})[ptspState.modality]||'Milhar'}`));
+    const p=document.getElementById('oraclePalpiteResult');if(p)p.textContent=text||'----';
+    const bi=document.getElementById('oracleBichoResult');if(bi)bi.textContent=bicho||'—';
+    const st=document.getElementById('oraclePickStatus');if(st)st.textContent=`Análise concluída com ${stats?.ordered?.length||0} resultados anteriores.`;
+    const eng=document.getElementById('oracleEngineText');if(eng)eng.textContent='✨ Oráculo em sintonia.';
+    document.getElementById('oracleEngineCard')?.classList.remove('engine-waiting');
+  }
+  function showPTSPWait(msg){
+    document.getElementById('oracleSelectedInfo')?.replaceChildren(document.createTextNode(`Para Todos - SP · Sorteio ${ptspState.time} · ${ptspState.modality==='milhar'?'Milhar':ptspState.modality}`));
+    const p=document.getElementById('oraclePalpiteResult');if(p)p.textContent='----';
+    const bi=document.getElementById('oracleBichoResult');if(bi)bi.textContent=msg;
+    const st=document.getElementById('oraclePickStatus');if(st)st.textContent=msg;
+    const eng=document.getElementById('oracleEngineText');if(eng)eng.textContent='⏳ Aguardando o sorteio anterior.';
+  }
+  function ptspKey(date){return `${NS}${date}|${PTSP.api}|POR_SORTEIO|${ptspState.time}|${ptspState.modality}`;}
+  async function computePTSP(){
+    if(ptspState.busy)return;
+    ptspState.busy=true;const rid=++ptspState.request;const date=isoToday();const key=ptspKey(date);
+    try{
+      const cached=(()=>{try{const r=localStorage.getItem(key);return r?JSON.parse(r):null;}catch(_){return null;}})();
+      if(cached?.portfolio?.[ptspState.modality]){renderPTSPValue(cached.portfolio,cached.stats);ptspState.busy=false;return;}
+      const history=await fetchPTSPHistory(shiftDate(date,-10),date);
+      if(rid!==ptspState.request)return;
+      const target=resolveDraw(history,date,ptspState.time);
+      if(target.rows.some(r=>Number(r.prize)===1)){showPTSPWait('O sorteio alvo já possui resultado; não é permitida previsão retroativa.');return;}
+      const idx=PTSP.times.indexOf(ptspState.time);
+      const prevUi=idx>0?PTSP.times[idx-1]:PTSP.times[PTSP.times.length-1];
+      const prevDate=idx>0?date:shiftDate(date,-1);
+      const prev=resolveDraw(history,prevDate,prevUi);
+      if(!prev.rows.length){showPTSPWait(`Aguardando o resultado do sorteio imediatamente anterior (${prevUi}).`);return;}
+      const rows=beforeCutoff(history,date,target.time);
+      if(rows.length<20) throw new Error(`Histórico insuficiente para o Para Todos-SP (${rows.length} resultados).`);
+      const stats=E.buildStats(rows,date);
+      const portfolio=E.buildPortfolio(stats,`V27|PTSP|POR_SORTEIO|${ptspState.time}|${date}`,{referenceDate:date,previousRows:prev.rows,previousDraw:prev.rows[0]||null,specialSignal:null},{});
+      const snap={portfolio,stats:{ordered:stats.ordered,calendar:stats.calendar,vir:stats.vir},generatedAt:new Date().toISOString(),displayTime:ptspState.time,sourceTargetTime:target.time,sourcePreviousTime:prev.time};
+      try{localStorage.setItem(key,JSON.stringify(snap));}catch(_){ }
+      if(rid!==ptspState.request)return;
+      renderPTSPValue(portfolio,snap.stats);
+    }catch(err){if(rid!==ptspState.request)return;showPTSPWait(err?.message||'Não foi possível calcular o palpite.');}
+    finally{ptspState.busy=false;}
+  }
+
+  // Remove memórias anteriores uma vez por atualização.
+  purgeLegacy();
+
+  // Envolve o controlador original, sem tocar no restante do app.
+  const originalLottery=root.oraculoV14SelectLottery;
+  const originalTime=root.oraculoV14SelectTime;
+  const originalModality=root.oraculoV14SelectModality;
+  const originalSubMode=root.mudarSubModoOracle;
+  const originalMode=root.mudarModoOracle;
+
+  root.oraculoV14SelectLottery=function(id){
+    if(id==='paratodos_sp' && isSortMode()){
+      syncPTSPUi(); computePTSP(); return;
+    }
+    return typeof originalLottery==='function'?originalLottery.apply(this,arguments):undefined;
+  };
+  root.oraculoV14SelectTime=function(t){
+    if(activePTSP() && isSortMode() && PTSP.times.includes(t)){ptspState.time=t;renderPTSPHours();computePTSP();return;}
+    return typeof originalTime==='function'?originalTime.apply(this,arguments):undefined;
+  };
+  root.oraculoV14SelectModality=function(m){
+    if(activePTSP() && isSortMode()){
+      ptspState.modality=m;renderPTSPMods();computePTSP();return;
+    }
+    return typeof originalModality==='function'?originalModality.apply(this,arguments):undefined;
+  };
+  root.mudarSubModoOracle=function(mode){
+    if(mode==='sorteio' && activePTSP()){
+      syncPTSPUi();computePTSP();return;
+    }
+    const r=typeof originalSubMode==='function'?originalSubMode.apply(this,arguments):undefined;
+    return r;
+  };
+
+  // Re-render as a final safety net after the existing UI hotfix.
+  root.addEventListener('load',()=>setTimeout(()=>{
+    if(activePTSP()&&isSortMode()){syncPTSPUi();computePTSP();}
+  },180));
+
+  E.__v27StabilityPatch=true;
+  root.OraculoV27={recentMap,repeatPenalty,softenRank};
+})(typeof window!=='undefined'?window:globalThis);
+</script>
+
 </body>
 </html>
