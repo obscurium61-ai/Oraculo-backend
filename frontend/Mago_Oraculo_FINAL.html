@@ -5733,7 +5733,7 @@ function renderOracleModalidades(){
   ];
   const schedules=Object.fromEntries(LOTTERIES.map(x=>[x.api,x.times]));
   const state={lottery:LOTTERIES[0],mode:'dia',time:LOTTERIES[0].times[0],modality:'milhar',superType:'milhar',busy:false,request:0,cache:new Map(),lastDate:null};
-  const NS='ORACULO_V29|';
+  const NS='ORACULO_V30|';
 
   function today(){
     const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
@@ -5753,7 +5753,7 @@ function renderOracleModalidades(){
       const prefixes=[
         'ORACULO_V16|','ORACULO_V17|','ORACULO_V18|','ORACULO_V19|','ORACULO_V20|','ORACULO_V21|','ORACULO_V22|','ORACULO_V23|',
         'ORACULO_FINAL_V12|','ORACULO_FINAL_V13|','ORACULO_FINAL_V14|','ORACULO_FINAL_V15|','ORACULO_FINAL_V16|','ORACULO_FINAL_V17|','ORACULO_FINAL_V18|','ORACULO_FINAL_V19|','ORACULO_FINAL_V20|','ORACULO_FINAL_V21|','ORACULO_FINAL_V22|','ORACULO_FINAL_V23|',
-        'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|'
+        'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|','ORACULO_V29|'
       ];
       for(let i=localStorage.length-1;i>=0;i--){
         const k=localStorage.key(i)||'';
@@ -6267,11 +6267,10 @@ function renderOracleModalidades(){
       let score=Number(c.score)||0;
       const info=candidateRepeatInfo(model,c.number,length);
       score-=repeatPenalty(info,length,model);
-      // Proteção antiga do V13 era um bloqueio disfarçado. Aqui ela vira apenas
-      // mais um caso de repetição recente, já tratado pelo modelo acima.
-      if(length===4 && prevExact.has(String(c.number))){
-        score+=5; // neutraliza o desconto rígido do wrapper V13, sem remover o candidato.
-      }
+      // A repetição do sorteio anterior NÃO recebe bônus artificial.
+      // O motor-base já calcula a penalização pela idade da ocorrência, taxa
+      // histórica de repetição, posição do prêmio e contexto. Assim, o mesmo
+      // número continua elegível, mas precisa vencer pelos demais sinais.
       return {...c,score,_v22Repeat:info};
     }).sort((a,b)=>b.score-a.score||b.tie-a.tie);
     const preferred=preferFreshTop(scored,length,model);
@@ -6293,7 +6292,7 @@ function renderOracleModalidades(){
       const remove=[];
       for(let i=localStorage.length-1;i>=0;i--){
         const k=localStorage.key(i)||'';
-        if(/^ORACULO_V(?:16|18|19|20|21)\|/.test(k)||/^ORACULO_FINAL_V(?:18|19|20|21)\|/.test(k)||k.startsWith('ORACULO_PTSP_FIX_V17|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|')) remove.push(k);
+        if(/^ORACULO_V(?:16|18|19|20|21)\|/.test(k)||/^ORACULO_FINAL_V(?:18|19|20|21)\|/.test(k)||k.startsWith('ORACULO_PTSP_FIX_V17|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|','ORACULO_V29|')) remove.push(k);
       }
       remove.forEach(k=>localStorage.removeItem(k));
       localStorage.setItem('ORACULO_V22_MIGRATED','1');
@@ -6313,7 +6312,7 @@ function renderOracleModalidades(){
     const prefixes=[
       'ORACULO_V16|','ORACULO_V17|','ORACULO_V18|','ORACULO_V19|','ORACULO_V20|','ORACULO_V21|','ORACULO_V22|','ORACULO_V23|',
       'ORACULO_FINAL_V12|','ORACULO_FINAL_V13|','ORACULO_FINAL_V14|','ORACULO_FINAL_V15|','ORACULO_FINAL_V16|','ORACULO_FINAL_V17|','ORACULO_FINAL_V18|','ORACULO_FINAL_V19|','ORACULO_FINAL_V20|','ORACULO_FINAL_V21|','ORACULO_FINAL_V22|','ORACULO_FINAL_V23|',
-      'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|'
+      'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|','ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|','ORACULO_V29|'
     ];
     const remove=[];
     for(let i=localStorage.length-1;i>=0;i--){
@@ -6327,7 +6326,7 @@ function renderOracleModalidades(){
 </script>
 
 <script id="oraculo-v26-hierarchical-engine">
-/* Oráculo V26 — motor hierárquico único.
+/* Oráculo V30 — motor hierárquico único (correção de repetição do sorteio anterior).
    Ordem da análise:
    1) Bicho do Dia / calendário
    2) Viradinha + evidência histórica da Viradinha
@@ -6588,7 +6587,7 @@ function renderOracleModalidades(){
 
   // Migração: a V25 começa um ciclo limpo para que nenhuma previsão anterior seja reaproveitada.
   try{
-    const prefixes=['ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|','ORACULO_V23|','ORACULO_V22|','ORACULO_V21|','ORACULO_V20|','ORACULO_V19|','ORACULO_V18|','ORACULO_V17|','ORACULO_V16|','ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'];
+    const prefixes=['ORACULO_V24|','ORACULO_V25|','ORACULO_V26|','ORACULO_V27|','ORACULO_V28|','ORACULO_V29|','ORACULO_V23|','ORACULO_V22|','ORACULO_V21|','ORACULO_V20|','ORACULO_V19|','ORACULO_V18|','ORACULO_V17|','ORACULO_V16|','ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'];
     const oldFinal=/^ORACULO_FINAL_V(12|13|14|15|16|17|18|19|20|21|22|23|24)\\|/;
     const remove=[];
     for(let i=localStorage.length-1;i>=0;i--){
@@ -6597,6 +6596,7 @@ function renderOracleModalidades(){
     }
     remove.forEach(k=>localStorage.removeItem(k));
     localStorage.setItem('ORACULO_V26_MIGRATED','1');
+    localStorage.setItem('ORACULO_V30_READY','1');
   }catch(_){}
 })(typeof window!=='undefined'?window:globalThis);
 </script>
