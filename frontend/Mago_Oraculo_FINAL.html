@@ -7125,5 +7125,114 @@ function renderOracleModalidades(){
 })(typeof window!=='undefined'?window:globalThis);
 </script>
 
+
+<script id="oraculo-v28-ptsp-source-lock">
+/* V28 — Para Todos-SP no Por Sorteio: fonte e estado independentes.
+   Corrige o problema em que o painel de resultados continuava usando a loteria anterior
+   (normalmente PT-RIO) porque o controlador especializado do PT-SP não sincronizava
+   oracleCurrentLottery antes de loadOracleResults().
+*/
+(function(){
+  'use strict';
+  const PT={id:'paratodos_sp', api:'Para Todos-SP', name:'Para Todos - SP', times:['08:20','10:20','12:20','13:20','15:20','17:20','19:20','20:20']};
+  const root=window;
+  const backend=(location.protocol==='http:'||location.protocol==='https:')&&location.hostname ? location.origin : 'https://oraculo-backend-mor3.onrender.com';
+
+  function selectedLotteryName(){
+    const b=[...document.querySelectorAll('#oracleLotteryList .lottery-btn')].find(x=>x.classList.contains('active'));
+    return String(b?.textContent||'').trim();
+  }
+  function isPTSPSelected(){ return selectedLotteryName()==='Para Todos - SP'; }
+  function isSortMode(){ return document.getElementById('btnOracleSubPorSorteio')?.classList.contains('active'); }
+  function syncPTSPGlobalState(){
+    try{
+      root.oracleCurrentLottery={id:PT.id,nome:PT.name,horarios:PT.times.slice()};
+      root.oracleCurrentHorario=String(root.oracleCurrentHorario||PT.times[0]);
+      root.oracleCurrentSubModo='sorteio';
+      root.oraclePickType=root.oraclePickType||'milhar';
+    }catch(_){ }
+  }
+  function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+  function normalize(r){
+    const n=String(r?.number??r?.numero??r?.result??'').replace(/\D/g,'').slice(-4).padStart(4,'0');
+    const date=String(r?.date??'');
+    const time=String(r?.draw_time??r?.horario??r?.time??'').trim().slice(0,5);
+    const prize=Number(r?.prize??r?.premio??0);
+    const group=Number(r?.group??r?.grupo??0);
+    return {number:n,date,time,prize,group};
+  }
+  async function loadPTSPResults(date){
+    const status=document.getElementById('oracleStatus');
+    const box=document.getElementById('oracleResults');
+    if(!status||!box) return;
+    syncPTSPGlobalState();
+    status.textContent=`Consultando ${PT.name} em ${date}...`;
+    box.innerHTML='';
+    try{
+      const url=`${backend}/api/oracle/history?${new URLSearchParams({lottery:PT.api,start_date:date,end_date:date})}`;
+      const res=await fetch(url,{cache:'no-store',headers:{Accept:'application/json'}});
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data?.detail?.message||data?.detail||data?.error||`HTTP ${res.status}`);
+      const rows=(data.rows||[]).map(normalize).filter(r=>r.date===date && r.number.length===4);
+      status.textContent=`${rows.length} resultado(s) para ${PT.name} em ${date}.`;
+      if(!rows.length){box.innerHTML='<div class="oracle-empty">Nenhum resultado retornado para essa data.</div>';return;}
+      const grouped={};
+      rows.forEach(r=>{(grouped[r.time] ||= []).push(r);});
+      Object.keys(grouped).sort().forEach(time=>{
+        const card=document.createElement('div'); card.className='oracle-card';
+        const head=document.createElement('div'); head.className='oracle-card-head';
+        head.innerHTML=`<span>🕒 ${esc(time)}</span><span>${grouped[time].length} prêmio(s)</span>`; card.appendChild(head);
+        grouped[time].sort((a,b)=>a.prize-b.prize).forEach(r=>{
+          const line=document.createElement('div'); line.className='oracle-result-line';
+          const group=r.group?` · Grupo ${String(r.group).padStart(2,'0')}`:'';
+          line.innerHTML=`<span>${esc(String(r.prize||'—'))}º prêmio</span><strong>${esc(r.number)}${group}</strong>`;
+          card.appendChild(line);
+        });
+        box.appendChild(card);
+      });
+    }catch(err){
+      status.textContent=`Erro ao consultar ${PT.name}: ${err?.message||err}`;
+    }
+  }
+
+  // Força a função de consulta a respeitar a loteria visualmente selecionada.
+  const oldLoad=root.loadOracleResults;
+  root.loadOracleResults=function(){
+    const date=document.getElementById('oracleDate')?.value;
+    if(isPTSPSelected()){
+      if(!date){ const s=document.getElementById('oracleStatus'); if(s)s.textContent='Selecione uma data.'; return; }
+      return loadPTSPResults(date);
+    }
+    return typeof oldLoad==='function' ? oldLoad.apply(this,arguments) : undefined;
+  };
+
+  // Também sincroniza o estado global quando PT-SP é selecionado no Por Sorteio.
+  const oldSelect=root.oraculoV14SelectLottery;
+  root.oraculoV14SelectLottery=function(id){
+    if(id===PT.id && isSortMode()){
+      syncPTSPGlobalState();
+      try{root.oracleCurrentHorario = root.oracleCurrentHorario && PT.times.includes(root.oracleCurrentHorario) ? root.oracleCurrentHorario : PT.times[0];}catch(_){ }
+      if(typeof root.__oraculoV27SyncPTSP==='function') root.__oraculoV27SyncPTSP();
+      if(typeof root.__oraculoV27ComputePTSP==='function') root.__oraculoV27ComputePTSP();
+      return;
+    }
+    return typeof oldSelect==='function' ? oldSelect.apply(this,arguments) : undefined;
+  };
+
+  // Ajusta o estado quando o horário PT-SP é clicado.
+  const oldTime=root.oraculoV14SelectTime;
+  root.oraculoV14SelectTime=function(time){
+    if(isPTSPSelected() && isSortMode() && PT.times.includes(time)){
+      root.oracleCurrentHorario=time;
+      syncPTSPGlobalState();
+      if(typeof root.__oraculoV27ComputePTSP==='function') root.__oraculoV27ComputePTSP();
+      return;
+    }
+    return typeof oldTime==='function' ? oldTime.apply(this,arguments) : undefined;
+  };
+
+  root.__oraculoV28LoadPTSPResults=loadPTSPResults;
+})();
+</script>
 </body>
 </html>
