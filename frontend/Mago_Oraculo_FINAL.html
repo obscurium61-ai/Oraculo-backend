@@ -3514,7 +3514,7 @@ function generateOraclePicks(){
    • V15 não lê nem reutiliza memórias/snapshots de V13/V14.
    ====================================================================== */
 
-const ORACLE_V15_NS = 'ORACULO_V21';
+const ORACLE_V15_NS = 'ORACULO_V23';
 
 function oracleV15SPNow(){
     const s = new Date().toLocaleString('en-US',{timeZone:'America/Sao_Paulo'});
@@ -4087,47 +4087,181 @@ function oracleV21RepeatTolerance(info,length){
     return base+0.22*scarcity;
 }
 function rankOracleNumbers(length,stats,amount,contextKey='',profile='default',options={}){
+    /* V23: a repetição não é proibida nem escolhida por cópia.
+       Primeiro calculamos o score estatístico completo. Depois aplicamos uma
+       penalização contínua, proporcional à recência e à taxa histórica de
+       repetição daquela modalidade. Assim o candidato repetido pode vencer
+       quando realmente houver evidência forte, mas candidatos novos ganham
+       preferência quando estão estatisticamente próximos. */
     const max=10**length, candidates=[];
     const mapped=profile==='default'?'milhar':profile;
     const referenceDate=options.referenceDate||stats.referenceDate||oracleTodayISO();
+
+    const dayMs=86400000;
+    const toDay=(iso)=>{
+        const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        return m?Date.UTC(Number(m[1]),Number(m[2])-1,Number(m[3])):NaN;
+    };
+    const ageOf=(date)=>{
+        const a=toDay(referenceDate), b=toDay(date);
+        if(!Number.isFinite(a)||!Number.isFinite(b)) return 99;
+        const n=Math.round((a-b)/dayMs);
+        return n>=0?n:99;
+    };
+
+    // Monta uma vez a memória de repetição exata do histórico usado nesta previsão.
+    // Isso é por modalidade: milhar completa, centena final ou dezena final.
+    const lastDate=new Map(), lastPrize=new Map(), datesByKey=new Map();
+    const dateSets=new Map();
+    for(const r of (stats?.ordered||[])){
+        const date=String(r?.date||'');
+        if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+        const key=String(r?.number||'').slice(-length).padStart(length,'0');
+        if(!/^\d+$/.test(key)) continue;
+        if(!datesByKey.has(key)) datesByKey.set(key,[]);
+        const arr=datesByKey.get(key); if(!arr.includes(date)) arr.push(date);
+        const old=lastDate.get(key);
+        const prize=Number(r?.prize||0);
+        const oldPrize=Number(lastPrize.get(key)||99);
+        // Se a mesma milhar apareceu mais de uma vez no mesmo dia, guardamos
+        // a posição mais alta (1º prêmio é mais informativa que 5º).
+        if(!old || date>old || (date===old && prize>0 && prize<oldPrize)){
+            lastDate.set(key,date);
+            lastPrize.set(key,prize);
+        }
+        if(!dateSets.has(date)) dateSets.set(date,new Set());
+        dateSets.get(date).add(key);
+    }
+    for(const arr of datesByKey.values()) arr.sort();
+
+    // Densidade de repetições observada nos últimos 3 dias.
+    let recentRows=0, recentRepeatEvents=0;
+    for(let ago=1;ago<=3;ago++){
+        const ms=toDay(referenceDate)-ago*dayMs;
+        if(!Number.isFinite(ms)) continue;
+        const d=new Date(ms).toISOString().slice(0,10);
+        const prev=new Date(ms-dayMs).toISOString().slice(0,10);
+        const curSet=dateSets.get(d), prevSet=dateSets.get(prev);
+        if(curSet){
+            recentRows+=curSet.size;
+            if(prevSet) for(const k of curSet) if(prevSet.has(k)) recentRepeatEvents++;
+        }
+    }
+    const repeatDensity=recentRows?Math.min(1,recentRepeatEvents/recentRows):0;
+
+    // Sinais de calendário que podem justificar uma repetição do grupo.
+    let calendarGroup=0, viradaGroup=0;
+    try{
+        calendarGroup=Number(oracleBichoDoDia(referenceDate)?.group)||0;
+        const day=Number(String(referenceDate).slice(-2));
+        const rev=Number(String(day).padStart(2,'0').split('').reverse().join(''));
+        viradaGroup=rev<=25?rev:(typeof groupFromTail==='function'?Number(groupFromTail(String(rev).padStart(2,'0')))||0:0);
+    }catch(_){ }
+
+    function candidateRepeatMeta(value){
+        const key=String(value).slice(-length).padStart(length,'0');
+        const last=lastDate.get(key);
+        if(!last) return {age:99,rate:0,prize:0,calendar:false,virada:false};
+        const age=ageOf(last);
+        const dates=datesByKey.get(key)||[];
+        let specificHits=0, specificTrials=0;
+        if(age>=1&&age<=7){
+            const set=new Set(dates);
+            for(const d of dates){
+                const base=toDay(d);
+                if(!Number.isFinite(base)) continue;
+                const future=new Date(base+age*dayMs).toISOString().slice(0,10);
+                if(toDay(future)<=toDay(referenceDate)){ specificTrials++; if(set.has(future)) specificHits++; }
+            }
+        }
+        const globalRate=Number(stats?.exactRepeatRateByAgeByLength?.[length]?.[age]||0);
+        const specificRate=specificTrials>=3?specificHits/specificTrials:null;
+        const rate=specificRate===null?globalRate:(0.65*specificRate+0.35*globalRate);
+        const tail=Number(key.slice(-2));
+        const group=groupFromTail(key.slice(-2));
+        return {
+            age,
+            rate,
+            prize:Number(lastPrize.get(key)||0),
+            calendar:calendarGroup===group,
+            virada:viradaGroup===group,
+            density:repeatDensity,
+            tail
+        };
+    }
+
+    function repeatPenalty(meta){
+        if(meta.age===99 || meta.age>7) return 0;
+        // Milhar inteira repete menos que centena; dezena repete naturalmente mais.
+        const base=length===4?0.34:length===3?0.15:0.055;
+        const ageFactor=meta.age<=0?1.65:meta.age===1?1.50:meta.age===2?1.12:meta.age===3?0.82:meta.age===4?0.58:meta.age===5?0.40:meta.age===6?0.28:0.18;
+        // Quanto mais repetição o próprio histórico mostra, menor a penalização.
+        const rateFactor=1-Math.min(0.48,meta.rate*4.0);
+        // Se houve várias repetições recentes, também não exageramos.
+        const densityFactor=1-Math.min(0.35,meta.density*0.90);
+        // 1º prêmio anterior merece um freio maior; 2º-5º recebem freio menor.
+        const prizeFactor=meta.prize===1?1.28:(meta.prize>=2&&meta.prize<=5?0.92:0.80);
+        // Calendário/Viradinha podem justificar a volta do mesmo bicho.
+        const signalFactor=meta.calendar?0.58:(meta.virada?0.72:1);
+        return base*ageFactor*rateFactor*densityFactor*prizeFactor*signalFactor;
+    }
+
+    function freshPreferenceThreshold(meta){
+        if(meta.age===99||meta.age>7) return 0;
+        let t=length===4?[0.50,0.45,0.34,0.26,0.19,0.14,0.10,0.07][meta.age]
+             :length===3?[0.28,0.25,0.20,0.15,0.11,0.08,0.05,0.035][meta.age]
+             :[0.14,0.12,0.10,0.075,0.055,0.04,0.03,0.02][meta.age];
+        if(meta.calendar) t*=0.68;
+        else if(meta.virada) t*=0.80;
+        if(meta.rate>0.08) t*=0.72;
+        if(meta.density>0.12) t*=0.78;
+        if(meta.prize===1) t*=1.12;
+        return t;
+    }
+
     for(let i=0;i<max;i++){
         const value=String(i).padStart(length,'0');
         const full='0'.repeat(4-length)+value;
-        const score=oracleV15CandidateScore(full,length,stats,contextKey,mapped,referenceDate,options);
-        candidates.push({number:value,score});
+        let score=oracleV15CandidateScore(full,length,stats,contextKey,mapped,referenceDate,options);
+        const repeat=candidateRepeatMeta(value);
+        score-=repeatPenalty(repeat);
+        candidates.push({number:value,score,_repeat:repeat});
     }
     candidates.sort((a,b)=>b.score-a.score || oracleV15Rand(`${contextKey}|tie|${a.number}`)-oracleV15Rand(`${contextKey}|tie|${b.number}`));
-    const prevExact=options.previousExactSet instanceof Set ? [...options.previousExactSet].map(String) : (Array.isArray(options.previousExactSet) ? options.previousExactSet.map(String) : []);
-    const blockedExact=new Set([...(options.blockedValues||[]).map(String),...(options.previousValues||[]).map(String),...prevExact]);
+
+    // previousValues/blockedValues são escolhas já reservadas pelo contexto e continuam
+    // sendo exclusões deliberadas. A repetição do resultado anterior NÃO é uma exclusão.
+    const blockedExact=new Set([...(options.blockedValues||[]).map(String),...(options.previousValues||[]).map(String)]);
     const blockedTails=options.blockedTailSet||new Set();
-    const eligible=candidates.filter(c=>{
+    let eligible=candidates.filter(c=>{
         if(blockedExact.has(String(c.number))) return false;
         if(blockedTails.has(Number(c.number.slice(-2)))) return false;
-        const info=oracleV21RecentExactInfo(stats,c.number,length,referenceDate);
-        return !info.hard;
+        return true;
     });
     if(!eligible.length) return [];
-    let orderedForSelection=eligible.slice();
-    const top=orderedForSelection[0];
-    const topInfo=oracleV21RecentExactInfo(stats,top.number,length,referenceDate);
-    if(topInfo.soft){
-        const fresh=orderedForSelection.filter(c=>!oracleV21RecentExactInfo(stats,c.number,length,referenceDate).soft);
-        const freshTop=fresh[0];
-        if(freshTop){
-            const tolerance=oracleV21RepeatTolerance(topInfo,length);
-            const advantage=(Number(top.score)-Number(freshTop.score))/Math.max(Math.abs(Number(freshTop.score)),0.25);
-            // Repetição recente só volta ao topo quando realmente superar o melhor
-            // candidato novo por uma margem estatística clara.
-            if(advantage<tolerance) orderedForSelection=[freshTop,...orderedForSelection.filter(c=>c!==freshTop)];
+
+    // Se uma repetição recente estiver em 1º, comparamos com o melhor candidato
+    // novo. O repetido só permanece no topo quando tiver vantagem estatística clara.
+    const fresh=eligible.filter(c=>c._repeat.age===99||c._repeat.age>7);
+    if(fresh.length){
+        const top=eligible[0], meta=top._repeat;
+        if(meta.age<=7){
+            const freshTop=fresh[0];
+            const denom=Math.max(Math.abs(Number(freshTop.score)),0.20);
+            const advantage=(Number(top.score)-Number(freshTop.score))/denom;
+            const threshold=freshPreferenceThreshold(meta);
+            if(advantage<threshold){
+                eligible=[freshTop,...eligible.filter(c=>c!==freshTop)];
+            }
         }
     }
-    const selected=(profile==='palpitao')
-        ? oraclePickGroupedNumbers(orderedForSelection,amount,contextKey,{temperature:oracleV15Profile(mapped).temperature})
-        : oraclePickDiverse(orderedForSelection,amount,contextKey,[],{temperature:oracleV15Profile(mapped).temperature});
-    const rankMap=new Map(candidates.map((x,i)=>[x.number,i+1]));
-    return selected.map(x=>({...x,rank:rankMap.get(x.number)||0}));
-}
 
+    const selected=(profile==='palpitao')
+        ? oraclePickGroupedNumbers(eligible,amount,contextKey,{temperature:oracleV15Profile(mapped).temperature})
+        : oraclePickDiverse(eligible,amount,contextKey,[],{temperature:oracleV15Profile(mapped).temperature});
+    const rawRankMap=new Map(candidates.map((x,i)=>[x.number,i+1]));
+    return selected.map(x=>({...x,rank:rawRankMap.get(x.number)||0}));
+}
 function oracleGroupScore(group,stats,contextKey,referenceDate,profile='default',options={}){
     const g=Number(group); if(g<1||g>25) return -999;
     const baseGroup=profile==='duque_grupo'?{hot:.18,recent:.18,delay:.18,transition:.18,moment:.11,calendar:.08,prize:.09}
@@ -6316,5 +6450,27 @@ function renderOracleModalidades(){
 })(typeof window!=='undefined'?window:globalThis);
 </script>
 
+
+<script id="oraculo-v23-snapshot-reset">
+(function(){
+  'use strict';
+  try{
+    if(localStorage.getItem('ORACULO_V23_MIGRATED')!=='1'){
+      const prefixes=[
+        'ORACULO_V21|','ORACULO_V22|','ORACULO_V20|','ORACULO_V19|','ORACULO_V18|',
+        'ORACULO_FINAL_V20|','ORACULO_FINAL_V19|','ORACULO_FINAL_V18|',
+        'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'
+      ];
+      const remove=[];
+      for(let i=localStorage.length-1;i>=0;i--){
+        const k=localStorage.key(i)||'';
+        if(prefixes.some(p=>k.startsWith(p))) remove.push(k);
+      }
+      remove.forEach(k=>localStorage.removeItem(k));
+      localStorage.setItem('ORACULO_V23_MIGRATED','1');
+    }
+  }catch(_){ }
+})();
+</script>
 </body>
 </html>
