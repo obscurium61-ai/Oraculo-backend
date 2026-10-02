@@ -5524,7 +5524,13 @@ function renderOracleModalidades(){
   }
 
   function ranked(length,stats,options,context,limit=1000){
-    const arr=E.rankCandidates(length,stats,options,context,limit).slice();
+    // Usa o ranker público mais recente quando os patches posteriores estiverem carregados.
+    // Isso garante que a análise de repetição estatística realmente participe da seleção
+    // da carteira, em vez de ficar apenas definida no arquivo sem ser chamada.
+    const ranker=(root.OraculoV13&&typeof root.OraculoV13.rankCandidates==='function')
+      ? root.OraculoV13.rankCandidates
+      : E.rankCandidates;
+    const arr=ranker.call(root.OraculoV13||root,length,stats,options,context,limit).slice();
     // Deterministic re-ranking with a strong penalty for numbers already in the
     // immediately previous draw. Exact repetition is intentionally avoided.
     const prevExact=exactPreviousSet(options);
@@ -5727,7 +5733,7 @@ function renderOracleModalidades(){
   ];
   const schedules=Object.fromEntries(LOTTERIES.map(x=>[x.api,x.times]));
   const state={lottery:LOTTERIES[0],mode:'dia',time:LOTTERIES[0].times[0],modality:'milhar',superType:'milhar',busy:false,request:0,cache:new Map(),lastDate:null};
-  const NS='ORACULO_V16|';
+  const NS='ORACULO_V25|';
 
   function today(){
     const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
@@ -5744,9 +5750,14 @@ function renderOracleModalidades(){
   function purgeOldSnapshots(){
     try{
       const remove=[];
-      for(let i=0;i<localStorage.length;i++){
+      const prefixes=[
+        'ORACULO_V16|','ORACULO_V17|','ORACULO_V18|','ORACULO_V19|','ORACULO_V20|','ORACULO_V21|','ORACULO_V22|','ORACULO_V23|',
+        'ORACULO_FINAL_V12|','ORACULO_FINAL_V13|','ORACULO_FINAL_V14|','ORACULO_FINAL_V15|','ORACULO_FINAL_V16|','ORACULO_FINAL_V17|','ORACULO_FINAL_V18|','ORACULO_FINAL_V19|','ORACULO_FINAL_V20|','ORACULO_FINAL_V21|','ORACULO_FINAL_V22|','ORACULO_FINAL_V23|',
+        'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'
+      ];
+      for(let i=localStorage.length-1;i>=0;i--){
         const k=localStorage.key(i)||'';
-        if(/^ORACULO_(?:V|FINAL_V)(?:10|11|12|13|14|15|16|17)\|/.test(k)||/^ORACULO_FINAL_V(?:12|13|14|15|16|17)\|/.test(k)) remove.push(k);
+        if(prefixes.some(prefix=>k.startsWith(prefix))) remove.push(k);
       }
       remove.forEach(k=>localStorage.removeItem(k));
     }catch(_){ }
@@ -5872,6 +5883,8 @@ function renderOracleModalidades(){
       state.busy=false;
       return;
     }
+    // Não reutilizar snapshots antigos fora do V24. O V24 começa um ciclo limpo.
+    purgeOldSnapshots();
     const existing=loadSnapshot(key);
     if(existing?.portfolio && existing.portfolio[state.modality]){
       const cached=existing.portfolio[state.modality];
@@ -5913,7 +5926,9 @@ function renderOracleModalidades(){
 
   async function computeSuper(){
     if(state.busy)return;
-    state.busy=true;const req=++state.request,date=today(),type=state.superType,key=superKey(),existing=loadSnapshot(key);
+    state.busy=true;const req=++state.request,date=today(),type=state.superType,key=superKey();
+    purgeOldSnapshots();
+    const existing=loadSnapshot(key);
     if(existing?.result){renderSuperResult(existing);state.busy=false;return;}
     setText('oracleSuperPalpiteResult','••••');setText('oracleSuperDescription','✨ Analisando as quatro fontes de resultados...');setHTML('oracleSuperGridContainer','');engineMessage('✨ Oráculo em sintonia.');
     try{
@@ -6451,26 +6466,299 @@ function renderOracleModalidades(){
 </script>
 
 
-<script id="oraculo-v23-snapshot-reset">
+<script id="oraculo-v24-snapshot-reset">
 (function(){
   'use strict';
   try{
-    if(localStorage.getItem('ORACULO_V23_MIGRATED')!=='1'){
-      const prefixes=[
-        'ORACULO_V21|','ORACULO_V22|','ORACULO_V20|','ORACULO_V19|','ORACULO_V18|',
-        'ORACULO_FINAL_V20|','ORACULO_FINAL_V19|','ORACULO_FINAL_V18|',
-        'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'
-      ];
-      const remove=[];
-      for(let i=localStorage.length-1;i>=0;i--){
-        const k=localStorage.key(i)||'';
-        if(prefixes.some(p=>k.startsWith(p))) remove.push(k);
-      }
-      remove.forEach(k=>localStorage.removeItem(k));
-      localStorage.setItem('ORACULO_V23_MIGRATED','1');
+    const prefixes=[
+      'ORACULO_V16|','ORACULO_V17|','ORACULO_V18|','ORACULO_V19|','ORACULO_V20|','ORACULO_V21|','ORACULO_V22|','ORACULO_V23|',
+      'ORACULO_FINAL_V12|','ORACULO_FINAL_V13|','ORACULO_FINAL_V14|','ORACULO_FINAL_V15|','ORACULO_FINAL_V16|','ORACULO_FINAL_V17|','ORACULO_FINAL_V18|','ORACULO_FINAL_V19|','ORACULO_FINAL_V20|','ORACULO_FINAL_V21|','ORACULO_FINAL_V22|','ORACULO_FINAL_V23|',
+      'ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'
+    ];
+    const remove=[];
+    for(let i=localStorage.length-1;i>=0;i--){
+      const k=localStorage.key(i)||'';
+      if(prefixes.some(p=>k.startsWith(p))) remove.push(k);
     }
-  }catch(_){ }
+    remove.forEach(k=>localStorage.removeItem(k));
+    localStorage.setItem('ORACULO_V24_MIGRATED','1');
+  }catch(_){}
 })();
 </script>
+
+<script id="oraculo-v25-hierarchical-engine">
+/* Oráculo V25 — motor hierárquico único.
+   Ordem da análise:
+   1) Bicho do Dia / calendário
+   2) Viradinha + evidência histórica da Viradinha
+   3) Bicho do momento / sorteio anterior / sinais especiais
+   4) Ranking de grupos
+   5) Ranking numérico (frequência, recência, atraso, dígitos, pares/trincas,
+      transições, posição 1º–5º, coocorrência e repetição contextual)
+   6) Diversificação e cobertura 1º–5º
+
+   A repetição NÃO é proibição. É apenas um sinal estatístico que pesa na
+   comparação final, podendo voltar quando o conjunto de evidências favorecer.
+*/
+(function(root){
+  'use strict';
+  const E=root.OraculoV13;
+  if(!E || typeof E.rankCandidates!=='function' || typeof E.buildPortfolio!=='function' || typeof E.rankGroups!=='function') return;
+  if(E.__v25HierarchicalEngine) return;
+
+  const baseRankCandidates=E.rankCandidates;
+  const baseRankGroups=E.rankGroups;
+  const baseBuildPortfolio=E.buildPortfolio;
+  const GROUPS=E.GROUPS||[];
+
+  const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+  const logNorm=(v,max)=>{ if(!max||!isFinite(v)||v<=0) return 0; return Math.log1p(v)/Math.log1p(max); };
+  const pad4=v=>String(v??'').replace(/\D/g,'').slice(-4).padStart(4,'0');
+  const fmtNum=(v,length)=>String(v??'').replace(/\D/g,'').slice(-length).padStart(length,'0');
+  const tail=n=>Number(pad4(n).slice(-2));
+  const groupFromTail=t=>E.groupFromTail(String(t).padStart(2,'0'));
+
+  function historicalSignalEvidence(stats){
+    const ordered=Array.isArray(stats?.ordered)?stats.ordered:[];
+    const byDraw=new Map();
+    for(const r of ordered){
+      const k=`${r.date}|${r.time}`;
+      if(!byDraw.has(k)) byDraw.set(k,[]);
+      if(byDraw.get(k).length<5) byDraw.get(k).push(r);
+    }
+    const calHits=Array(26).fill(0), virHits=Array(26).fill(0);
+    let calTrials=0,virTrials=0;
+    for(const rows of byDraw.values()){
+      if(!rows.length) continue;
+      const date=rows[0].date;
+      const cal=typeof E.dayCalendar==='function'?E.dayCalendar(date):null;
+      const vir=typeof E.viradinha==='function'?E.viradinha(date):null;
+      const pw={1:0.40,2:0.24,3:0.15,4:0.11,5:0.07};
+      const totalWeight=rows.reduce((s,r)=>s+(pw[r.prize]||0.04),0)||1;
+      const seenGroups=new Map();
+      for(const r of rows){
+        const g=Number(r.group)||groupFromTail(tail(r.number));
+        if(g<1||g>25) continue;
+        seenGroups.set(g,(seenGroups.get(g)||0)+(pw[r.prize]||0.04));
+      }
+      if(cal?.group){
+        calTrials+=1;
+        calHits[cal.group]+= (seenGroups.get(cal.group)||0)/totalWeight;
+      }
+      if(vir?.group){
+        virTrials+=1;
+        virHits[vir.group]+= (seenGroups.get(vir.group)||0)/totalWeight;
+      }
+    }
+    const baseline=1/25;
+    const refDate=String(stats?.referenceDate||'');
+    const refCal=typeof E.dayCalendar==='function'?E.dayCalendar(refDate):null;
+    const refVir=typeof E.viradinha==='function'?E.viradinha(refDate):null;
+    const calRate=calTrials&&refCal?.group?clamp(calHits[refCal.group]/calTrials):0;
+    const virRate=virTrials&&refVir?.group?clamp(virHits[refVir.group]/virTrials):0;
+    const calStrength=clamp((calRate-baseline)/0.10);
+    const virStrength=clamp((virRate-baseline)/0.10);
+    return {calHits,virHits,calTrials,virTrials,calRate,virRate,calStrength,virStrength,referenceCalendarGroup:refCal?.group||0,referenceViradinhaGroup:refVir?.group||0};
+  }
+
+  function groupContextScores(stats,options={},context=''){
+    const base=baseRankGroups.call(E,stats,options,`${context}|BASE_GROUPS`).slice();
+    const evidence=historicalSignalEvidence(stats);
+    const maxMoment=Math.max(...(stats.momentGroup||[]),0)||1;
+    const maxRecent=Math.max(...((stats.recent2Group||[]).flat()),0)||1;
+    const calendar=Number(stats.calendar?.group)||0;
+    const virada=Number(stats.vir?.group)||0;
+    const previous=Number(options.previousDraw?.group||0);
+    const specialFirst=Number(options.specialSignal?.firstGroup||0);
+    const specialDominant=Number(options.specialSignal?.dominantGroup||0);
+    return base.map(g=>{
+      const group=Number(g.group);
+      const recent=(stats.recent2Group?.[0]?.[group]||0)/maxRecent;
+      const moment=(stats.momentGroup?.[group]||0)/maxMoment;
+      const calHit=evidence.calTrials?evidence.calHits[group]/evidence.calTrials:0;
+      const virHit=evidence.virTrials?evidence.virHits[group]/evidence.virTrials:0;
+      const calBoost=calendar===group ? (0.10+0.12*evidence.calStrength):0;
+      const virBoost=virada===group ? (0.08+0.13*evidence.virStrength):0;
+      const synergy=(calendar===group&&virada===group)?0.055:0;
+      const momentBoost=0.07*moment + 0.04*recent;
+      // O grupo do sorteio anterior é um sinal de momento, mas não deve ser
+      // favorecido mecanicamente: repetição de grupo só vence quando as demais
+      // estatísticas também sustentarem essa escolha.
+      const previousBoost=previous===group?-0.020:0;
+      const specialBoost=(specialFirst===group?0.055:0)+(specialDominant===group?0.035:0);
+      const signalEvidence=0.05*calHit+0.05*virHit;
+      const score=Number(g.score||0)+calBoost+virBoost+synergy+momentBoost+previousBoost+specialBoost+signalEvidence;
+      return {...g,score,calendarHit:calHit,viradaHit:virHit,contextSignals:{calBoost,virBoost,synergy,momentBoost,previousBoost,specialBoost}};
+    }).sort((a,b)=>b.score-a.score||b.tie-a.tie);
+  }
+
+  function hierarchicalRankCandidates(length,stats,options={},context='',limit=1000){
+    const base=baseRankCandidates.call(E,length,stats,options,context,Math.max(limit,Math.min(10000,10**length))).slice();
+    if(!base.length) return base;
+    const groupScores=groupContextScores(stats,options,context);
+    const groupMax=Math.max(...groupScores.map(x=>x.score),0.0001);
+    const groupMap=new Map(groupScores.map(x=>[Number(x.group),x.score/groupMax]));
+
+    // Replicação exata no 1º prêmio deve ser tratada como evento raro, mas não proibido.
+    // Reusamos a métrica V22 quando disponível; ela só mexe no score final.
+    let repeatModel=null;
+    try{ if(root.OraculoV22?.repeatModel) repeatModel=root.OraculoV22.repeatModel(stats,length,options.referenceDate||stats.referenceDate); }catch(_){}
+
+    const refDate=String(options.referenceDate||stats.referenceDate||'');
+    const firstPrizeLast=new Map();
+    for(const r of (stats.ordered||[])){
+      if(Number(r?.prize)!==1) continue;
+      const k=String(r.number||'').replace(/\D/g,'').slice(-length).padStart(length,'0');
+      const d=String(r.date||'');
+      if(/^\d{4}-\d{2}-\d{2}$/.test(d)) firstPrizeLast.set(k,d);
+    }
+    const occurrenceAge=(number)=>{
+      if(!repeatModel) return null;
+      const key=fmtNum(number,length); const last=repeatModel.lastByKey?.get(key);
+      if(!last||!refDate)return null;
+      const a=Date.parse(refDate+'T12:00:00Z'),b=Date.parse(last+'T12:00:00Z');
+      return Number.isFinite(a)&&Number.isFinite(b)?Math.max(0,Math.round((a-b)/86400000)):null;
+    };
+    const firstPrizeAge=(number)=>{
+      const d=firstPrizeLast.get(fmtNum(number,length));
+      if(!d||!refDate)return null;
+      const a=Date.parse(refDate+'T12:00:00Z'),b=Date.parse(d+'T12:00:00Z');
+      return Number.isFinite(a)&&Number.isFinite(b)?Math.max(0,Math.round((a-b)/86400000)):null;
+    };
+
+    const ranked=base.map(c=>{
+      const n=fmtNum(c.number,length),g=groupFromTail(n.slice(-2));
+      let score=Number(c.score)||0;
+      // A camada hierárquica entra depois do ranking estatístico bruto: ela direciona
+      // para os grupos relevantes do dia sem excluir grupos bons por decreto.
+      const groupWeight=length===4?0.16:(length===3?0.115:0.075);
+      score += groupWeight*(groupMap.get(g)||0);
+      const age=occurrenceAge(c.number);
+      if(length===4 && age!==null && age>=2 && age<=3) score-=0.025;
+      if(length===3 && age!==null && age>=1 && age<=2) score-=0.012;
+      if(length===2 && age!==null && age>=1) score-=0.004;
+      // Repetição Milhar -> 1º prêmio novamente é tratada como evento raro,
+      // mas continua possível. A penalização é pequena e ainda menor quando
+      // calendário/Viradinha favorecem o grupo do candidato.
+      const fpAge=length===4?firstPrizeAge(c.number):null;
+      if(fpAge!==null && fpAge>=1 && fpAge<=7){
+        const signalGroup=(g===Number(stats.calendar?.group)||g===Number(stats.vir?.group));
+        const fpPenalty=fpAge===1?0.040:fpAge===2?0.030:fpAge===3?0.022:fpAge<=5?0.014:0.008;
+        score-=signalGroup?fpPenalty*0.65:fpPenalty;
+      }
+      return {...c,number:n,score,_v25GroupScore:groupMap.get(g)||0,_v25RepeatAge:age,_v25FirstPrizeAge:fpAge};
+    });
+    ranked.sort((a,b)=>b.score-a.score||b.tie-a.tie);
+    return ranked.slice(0,Math.max(limit,50));
+  }
+
+  function chooseDistinct(list,count,avoidExact=new Set(),avoidTails=new Set(),avoidGroups=new Set()){
+    const out=[], usedExact=new Set([...avoidExact].map(String));
+    const softTail=new Set([...avoidTails].map(String)),softGroup=new Set([...avoidGroups].map(Number));
+    for(const c of list){
+      if(out.length>=count) break;
+      const n=String(c.number),t=n.slice(-2),g=groupFromTail(t);
+      if(usedExact.has(n)) continue;
+      if(softTail.has(t)||softGroup.has(g)) continue;
+      out.push(c); usedExact.add(n); softTail.add(t); softGroup.add(g);
+    }
+    if(out.length<count){
+      for(const c of list){
+        if(out.length>=count) break;
+        const n=String(c.number); if(!usedExact.has(n)){out.push(c);usedExact.add(n);}
+      }
+    }
+    return out;
+  }
+
+  function hierarchicalBuildPortfolio(stats,baseContext,options={},avoidPortfolio={}){
+    const o={...(options||{})};
+    o.referenceDate=o.referenceDate||stats.referenceDate;
+    o.previousRows=Array.isArray(o.previousRows)?o.previousRows:[];
+    o.previousDraw=o.previousDraw||o.previousRows[0]||null;
+
+    // ETAPA 1–4: contexto do dia -> Viradinha -> momento -> ranking de grupos.
+    const grpRank=groupContextScores(stats,o,`${baseContext}|GROUP_HIERARCHY`);
+    const blockedGroups=new Set((avoidPortfolio.grupo||[]).map(Number));
+    // Não excluímos o grupo do sorteio anterior. Ele pode voltar quando as
+    // evidências forem realmente fortes; apenas recebe uma pequena penalização
+    // contextual acima, como qualquer outra repetição recente.
+    let groupChoice=grpRank.find(g=>!blockedGroups.has(g.group))?.group;
+    if(!groupChoice) groupChoice=grpRank.find(g=>!blockedGroups.has(g.group))?.group||grpRank[0]?.group||1;
+
+    // ETAPA 5–6: ranking numérico completo, agora condicionado pelo contexto hierárquico.
+    const milRank=hierarchicalRankCandidates(4,stats,o,`${baseContext}|MILHAR|HIERARCHICAL`,5000);
+    const cRank=hierarchicalRankCandidates(3,stats,o,`${baseContext}|CENTENA|HIERARCHICAL`,3000);
+    const dRank=hierarchicalRankCandidates(2,stats,o,`${baseContext}|DEZENA|HIERARCHICAL`,500);
+
+    const mAvoid=new Set((avoidPortfolio.milhar||[]).map(String));
+    const m=milRank.find(c=>!mAvoid.has(String(c.number)))||milRank[0]||{number:'0000'};
+
+    const cAvoid=new Set((avoidPortfolio.centena||[]).map(String));
+    // Não derivar Centena da Milhar; a única exclusão estrutural é a centena idêntica,
+    // para ampliar cobertura. A estatística continua comandando a escolha.
+    cAvoid.add(String(m.number).slice(-3));
+    const c=cRank.find(x=>!cAvoid.has(String(x.number)))||cRank[0]||{number:'000'};
+
+    const dAvoid=new Set((avoidPortfolio.dezena||[]).map(String));
+    dAvoid.add(String(m.number).slice(-2)); dAvoid.add(String(c.number).slice(-2));
+    const d=dRank.find(x=>!dAvoid.has(String(x.number)))||dRank[0]||{number:'00'};
+
+    const duqueRank=hierarchicalRankCandidates(2,stats,o,`${baseContext}|DUQUE|HIERARCHICAL`,900);
+    const duqueBlocked=new Set([String(d.number),String(m.number).slice(-2),String(c.number).slice(-2),...(avoidPortfolio.duque_dezena||[]).map(String)]);
+    const duque=chooseDistinct(duqueRank,2,duqueBlocked,new Set(o.previousRows.map(r=>String(r.number).slice(-2))),new Set());
+
+    const ternoBlocked=new Set([String(d.number),String(m.number).slice(-2),String(c.number).slice(-2),...duque.map(x=>String(x.number)),...(avoidPortfolio.terno_dezena||[]).map(String)]);
+    const terno=chooseDistinct(duqueRank,3,ternoBlocked,new Set(),new Set());
+
+    const palRank=hierarchicalRankCandidates(2,stats,o,`${baseContext}|PALPITAO|HIERARCHICAL`,1200);
+    const palBlocked=new Set([String(m.number).slice(-2),String(c.number).slice(-2),String(d.number),...(avoidPortfolio.palpitao||[]).map(String)]);
+    const palpitao=chooseDistinct(palRank,20,palBlocked,new Set(),new Set()).map(x=>x.number);
+
+    const dgRank=grpRank.filter(x=>x.group!==groupChoice);
+    const duqueG=[];
+    for(const g of dgRank){if(duqueG.length>=2)break;if(!blockedGroups.has(g.group)&&g.group!==groupChoice)duqueG.push(g.group);}
+    const tgRank=dgRank.filter(x=>!duqueG.includes(x.group));
+    const ternoG=[];
+    for(const g of tgRank){if(ternoG.length>=3)break;if(g.group!==groupChoice&&!duqueG.includes(g.group))ternoG.push(g.group);}
+    const pvRank=tgRank.filter(x=>!ternoG.includes(x.group));
+    const passe=[];
+    for(const g of pvRank){if(passe.length>=2)break;if(g.group!==groupChoice&&!duqueG.includes(g.group)&&!ternoG.includes(g.group))passe.push(g.group);}
+
+    return {
+      milhar:[m.number],centena:[c.number],dezena:[d.number],
+      duque_dezena:duque.map(x=>String(x.number)),terno_dezena:terno.map(x=>String(x.number)),
+      palpitao,palpitão:palpitao,grupo:[groupChoice],duque_grupo:duqueG,terno_grupo:ternoG,passe_vai:passe,
+      ranking:{milhar:milRank,centena:cRank,dezena:dRank,palpitao:palRank},
+      hierarchy:{calendar:stats.calendar,viradinha:stats.vir,chosenGroup:groupChoice,topGroups:grpRank.slice(0,8).map(x=>x.group)}
+    };
+  }
+
+  E.rankCandidates=hierarchicalRankCandidates;
+  E.buildPortfolio=hierarchicalBuildPortfolio;
+  E.buildPrediction=function(modality,stats,options={},context='',avoid={}){
+    const pack=hierarchicalBuildPortfolio(stats,context,options,avoid);
+    const vals=pack[modality]||[];
+    const groups=['grupo','duque_grupo','terno_grupo','passe_vai'].includes(modality);
+    return {kind:groups?'groups':'numbers',values:vals,portfolio:pack,ranking:pack.ranking?.[modality]||[]};
+  };
+
+  E.__v25HierarchicalEngine=true;
+  root.OraculoV25={hierarchicalRankCandidates,groupContextScores,historicalSignalEvidence,hierarchicalBuildPortfolio};
+
+  // Migração: a V25 começa um ciclo limpo para que nenhuma previsão anterior seja reaproveitada.
+  try{
+    const prefixes=['ORACULO_V24|','ORACULO_V23|','ORACULO_V22|','ORACULO_V21|','ORACULO_V20|','ORACULO_V19|','ORACULO_V18|','ORACULO_V17|','ORACULO_V16|','ORACULO_V13_SNAPSHOT|','ORACULO_PTSP_FIX_V17|'];
+    const oldFinal=/^ORACULO_FINAL_V(12|13|14|15|16|17|18|19|20|21|22|23|24)\\|/;
+    const remove=[];
+    for(let i=localStorage.length-1;i>=0;i--){
+      const k=localStorage.key(i)||'';
+      if(prefixes.some(p=>k.startsWith(p))||oldFinal.test(k)) remove.push(k);
+    }
+    remove.forEach(k=>localStorage.removeItem(k));
+    localStorage.setItem('ORACULO_V25_MIGRATED','1');
+  }catch(_){}
+})(typeof window!=='undefined'?window:globalThis);
+</script>\n
 </body>
 </html>
