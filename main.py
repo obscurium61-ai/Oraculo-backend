@@ -19,7 +19,10 @@ VERSION = "6.0.0-stateless-oraculo"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
-ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br", "www.resultadosorte.com", "resultadosorte.com"}
+LOOK_LIVE_URL = "https://www.ojogodobicho.com/look/deu-no-poste.htm"
+LOOK_ALT_URL = "https://deunopostecarioca.com.br/look-loterias"
+RIO_ALT_URL = "https://www.portalbrasil.net/jogodobicho/resultado-do-jogo-do-bicho/"
+ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br", "www.resultadosorte.com", "resultadosorte.com", "www.portalbrasil.net", "portalbrasil.net", "www.deunopostecarioca.com.br", "deunopostecarioca.com.br", "www.playbicho.com", "playbicho.com", "www.resultadodasorte.com.br", "resultadodasorte.com.br"}
 CACHE = {}
 LOOK_TIMES = {"07:20", "09:20", "11:20", "14:20", "16:20", "18:20", "21:20", "23:20"}
 
@@ -315,7 +318,10 @@ def parse_resultado_sorte_page(html: str, requested_day: date, lottery: str):
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 async def fetch_resultado_sorte(day: date, lottery: str):
-    url = _resultado_sorte_archive_url(day)
+    # A página inicial é a fonte pública do dia atual; /arquivo/<data>/ é usada
+    # apenas para dias anteriores. O endpoint de arquivo não é exposto para
+    # todas as datas recentes, portanto não deve ser usado para hoje.
+    url = RESULTADO_SORTE_BASE + "/" if day == brazil_today() else _resultado_sorte_archive_url(day)
     parsed = urlparse(url)
     if parsed.hostname not in RESULTADO_SORTE_HOSTS:
         raise HTTPException(400, "Fonte ResultadoSorte HTTPS não autorizada.")
@@ -923,6 +929,105 @@ async def aggregated_results(
         "note":"Resultados extraídos de tabelas identificadas do Resultado Fácil. Confira a banca e os horários na fonte."
     }
 
+# ---------------------------------------------------------------------------
+# Fallbacks de leitura para quando a fonte principal do Rio/LOOK bloquear
+# requisições automáticas. Não substituem o algoritmo do Oráculo.
+# ---------------------------------------------------------------------------
+
+def _group_from_number(number: str) -> int:
+    digits = re.sub(r"\D", "", str(number or ""))
+    if len(digits) < 2:
+        return 0
+    tail = int(digits[-2:])
+    return 25 if tail == 0 else ((tail - 1) // 4) + 1
+
+
+def parse_portalbrasil_rio_page(html: str, requested_day: date):
+    """Parseia a tabela-resumo do Portal Brasil para o Rio atual."""
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    code_to_time = {
+        "PPT": "09:20", "PTM": "11:20", "PT": "14:20",
+        "PTV": "16:20", "PTN": "18:20", "COR": "21:20",
+    }
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        header = [_clean(c.get_text(" ", strip=True)).upper() for c in rows[0].find_all(["th", "td"])]
+        if not header or not any("EXTRA" in h for h in header):
+            continue
+        for tr in rows[1:]:
+            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
+            if len(cells) < 6:
+                continue
+            first = cells[0].upper()
+            code = next((c for c in code_to_time if re.search(rf"\b{c}\b", first)), None)
+            if not code:
+                continue
+            numbers = re.findall(r"(?<!\d)(\d{4})(?!\d)", " ".join(cells[1:6]))
+            if len(numbers) < 5:
+                continue
+            for prize, number in enumerate(numbers[:5], 1):
+                results.append({
+                    "date": requested_day.isoformat(),
+                    "lottery": "PT-RIO",
+                    "draw_time": code_to_time[code],
+                    "draw_code": code,
+                    "prize": prize,
+                    "number": number,
+                    "group": f"{_group_from_number(number):02d}",
+                    "source": "portalbrasil.net",
+                })
+        if results:
+            break
+    return results
+
+
+def parse_deunopostecarioca_look_page(html: str, requested_day: date):
+    """Extrai os cinco primeiros prêmios da LOOK por data/horário."""
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    text = re.sub(r"[ \t]+", " ", text)
+    requested_label = requested_day.strftime("%d/%m/%Y")
+    # Divide pelos cabeçalhos de cada extração. O texto do site traz a data
+    # dentro do bloco, permitindo ignorar blocos de outros dias.
+    starts = list(re.finditer(
+        r"Resultado do jogo do bicho da Look Loterias de Goiás sorteio das (\d{1,2})h(\d{2}).*?" + re.escape(requested_label),
+        text, re.I | re.S))
+    results = []
+    for idx, m in enumerate(starts):
+        hour = f"{int(m.group(1)):02d}:{m.group(2)}"
+        # Começa no título e termina antes do próximo título de extração.
+        block_start = m.start()
+        next_match = re.search(
+            r"Resultad[o|a] do jogo do bicho da Look Loterias de Goiás sorteio das \d{1,2}h\d{2}",
+            text[m.end():], re.I)
+        block_end = m.end() + next_match.start() if next_match else len(text)
+        block = text[block_start:block_end]
+        # Como o primeiro casamento inclui a data, todos os 1º-5º seguintes
+        # pertencem à mesma extração até o próximo cabeçalho.
+        found = []
+        for pm in re.finditer(r"\b([1-5])º\s+(\d{4})\s+[^\(\n]*?\((\d{1,2})\)", block, re.I):
+            prize = int(pm.group(1))
+            number = pm.group(2)
+            group = int(pm.group(3))
+            if 1 <= group <= 25 and not any(x[0] == prize for x in found):
+                found.append((prize, number, group))
+        for prize, number, group in sorted(found):
+            results.append({
+                "date": requested_day.isoformat(),
+                "lottery": "LOOK Goiás",
+                "draw_time": hour,
+                "prize": prize,
+                "number": number,
+                "group": f"{group:02d}",
+                "source": "deunopostecarioca.com.br",
+            })
+    unique = {(r["draw_time"], r["prize"]): r for r in results}
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
+
+
 RIO_URL = "https://www.ojogodobicho.com/deu_no_poste.htm"
 RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
 RIO_ARCHIVE_URL = "https://www.ojogodobicho.com/resultado"
@@ -1324,19 +1429,41 @@ def _oracle_future_filter(rows: list[dict], day: date) -> list[dict]:
     return out
 
 async def _oracle_fetch_look(day: date):
-    # Mantém a fonte original. O fallback só entra se ela falhar/bloquear.
+    # 1) Página ao vivo para hoje; arquivo por data para históricos.
+    candidates = []
+    if day == brazil_today():
+        candidates.append((LOOK_LIVE_URL, parse_look_page, "ojogodobicho.com"))
+    candidates.append((source_url_for(day), parse_look_page, "ojogodobicho.com"))
+
+    for url, parser, _source in candidates:
+        try:
+            html = await fetch_html(validate_source_url(url))
+            rows = _oracle_future_filter(parser(html, day), day)
+            if rows:
+                return rows
+        except HTTPException:
+            continue
+
+    # 2) Fonte alternativa que mantém blocos da LOOK por data recente.
     try:
-        url = validate_source_url(source_url_for(day))
-        html = await fetch_html(url)
-        rows = parse_look_page(html, day)
+        html = await fetch_html(validate_source_url(LOOK_ALT_URL))
+        rows = _oracle_future_filter(parse_deunopostecarioca_look_page(html, day), day)
+        if rows:
+            return rows
+    except HTTPException:
+        pass
+
+    # 3) Último fallback do agregador. (A página atual não publica LOOK, mas
+    # mantemos a tentativa para não alterar o comportamento das demais fontes.)
+    try:
+        rows, _ = await fetch_resultado_sorte(day, "LOOK Goiás")
         rows = _oracle_future_filter(rows, day)
         if rows:
             return rows
     except HTTPException:
         pass
 
-    rows, _ = await fetch_resultado_sorte(day, "LOOK Goiás")
-    return _oracle_future_filter(rows, day)
+    raise HTTPException(404, f"LOOK Goiás sem resultados para {day.isoformat()}")
 
 async def _oracle_fetch_rio(day: date):
     rows=[]
@@ -1360,6 +1487,14 @@ async def _oracle_fetch_rio(day: date):
     if not rows:
         try:
             rows,_=await fetch_resultado_sorte(day, "PT-RIO")
+        except HTTPException:
+            rows=[]
+    # ResultadoSorte é a alternativa preferencial do dia atual; se a página
+    # oficial e o agregador não responderem, usa o Portal Brasil.
+    if not rows and day == brazil_today():
+        try:
+            html=await fetch_html(validate_source_url(RIO_ALT_URL))
+            rows=parse_portalbrasil_rio_page(html, day)
         except HTTPException:
             rows=[]
     rows=_oracle_future_filter(rows, day)
