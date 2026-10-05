@@ -766,6 +766,16 @@ RESULTADO_FACIL_BASE = "https://www.resultadofacil.com.br"
 def resultado_facil_url(day: date, lottery: str, expanded: bool = True) -> str:
     if lottery == "Para Todos-SP":
         return f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/sp/do-dia/{day.isoformat()}"
+    if lottery == "PT-RIO":
+        # A página curta /rj é a página atual; o histórico usa /do-dia/AAAA-MM-DD.
+        if day == brazil_today():
+            return f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/rj"
+        return f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/rj/do-dia/{day.isoformat()}"
+    if lottery == "LOOK Goiás":
+        # A LOOK segue o mesmo padrão do Resultado Fácil para GO.
+        if day == brazil_today():
+            return f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/go"
+        return f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/go/do-dia/{day.isoformat()}"
     # The historical National route has a dedicated date slug; try the expanded
     # page first and the ordinary date page as a fallback.
     suffix = "-1ao10" if expanded else ""
@@ -802,9 +812,20 @@ def parse_resultado_facil_page(html: str, requested_day: date, lottery: str):
                 continue
             canonical = "Para Todos-SP"
         elif lottery == "PT-RIO":
-            if not any(x in norm_heading for x in ("rio", "pt-rio", "pt rio")):
+            # Resultado Fácil identifica os sorteios do RJ como PT/PTM/PTV/PTN/COR
+            # e, em alguns títulos, usa apenas "RJ" em vez de "Rio".
+            rio_code = None
+            for code in ("PPT", "PTM", "PTV", "PTN", "COR", "PT"):
+                if re.search(rf"(?<![A-Z]){re.escape(code)}(?![A-Z])", heading_text, re.I):
+                    rio_code = code
+                    break
+            if rio_code is None or not any(x in norm_heading for x in ("rio", "rj", "ptm", "ptv", "ptn", "ppt", "cor", " pt")):
                 continue
             canonical = "PT-RIO"
+        elif lottery == "LOOK Goiás":
+            if not any(x in norm_heading for x in ("look", "goias", "goias".replace("i", "í"))):
+                continue
+            canonical = "LOOK Goiás"
         else:
             if not ("nacional" in norm_heading or re.search(r"\bln\b", norm_heading)):
                 continue
@@ -814,12 +835,30 @@ def parse_resultado_facil_page(html: str, requested_day: date, lottery: str):
         if tm:
             draw_time = f"{int(tm.group(1)):02d}:{tm.group(2)}"
         else:
-            # Some headers show only "08hs", "10hs", etc.
-            tm = re.search(r"\b(\d{1,2})\s*(?:hs|h)\b", heading_text, re.I)
+            # Alguns cabeçalhos usam "08h", "07h20min" ou "11hs".
+            tm = re.search(r"\b(\d{1,2})\s*h\s*(?:(\d{2})\s*min)?\b", heading_text, re.I)
             if tm:
-                draw_time = f"{int(tm.group(1)):02d}:00"
+                mm = int(tm.group(2) or 0)
+                draw_time = f"{int(tm.group(1)):02d}:{mm:02d}"
             else:
-                continue
+                tm = re.search(r"\b(\d{1,2})\s*(?:hs|h)\b", heading_text, re.I)
+                if tm:
+                    draw_time = f"{int(tm.group(1)):02d}:00"
+                else:
+                    continue
+
+        # O Resultado Fácil usa o horário redondo no título do RJ/LOOK,
+        # enquanto o Oráculo trabalha com o horário efetivo da apuração.
+        if canonical == "PT-RIO":
+            rio_time_by_code = {
+                "PPT": "09:20", "PTM": "11:20", "PT": "14:20",
+                "PTV": "16:20", "PTN": "18:20", "COR": "21:20",
+            }
+            draw_time = rio_time_by_code.get(rio_code, draw_time)
+        elif canonical == "LOOK Goiás":
+            hour = int(draw_time[:2])
+            if hour in {7, 9, 11, 14, 16, 18, 21, 23}:
+                draw_time = f"{hour:02d}:20"
 
         rows = table.find_all("tr")
         if not rows:
@@ -1028,6 +1067,104 @@ def parse_deunopostecarioca_look_page(html: str, requested_day: date):
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 
+DNP_RIO_URL = "https://deunopostenacional.com.br/deu-no-poste/9-horas/"
+DNP_LOOK_URL = "https://deunopostenacional.com.br/look-loterias/"
+
+def _dnp_draw_time_from_heading(title: str, lottery: str) -> str:
+    # Ex.: "Sorteio das 9 horas (9h20min)" / "Sorteio das 7 horas (7h20min)"
+    m = re.search(r"\((\d{1,2})\s*h\s*(\d{1,2})\s*min", title, re.I)
+    if m:
+        return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
+    m = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", title)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    m = re.search(r"\b(\d{1,2})\s*h\b", title, re.I)
+    if m:
+        hour = int(m.group(1))
+        return f"{hour:02d}:20" if lottery == "LOOK Goiás" or hour == 9 else f"{hour:02d}:00"
+    return ""
+
+
+def parse_dnp_public_bicho_page(html: str, requested_day: date, lottery: str):
+    """Parser genérico do Deu no Poste Nacional para páginas de banca.
+    Prioriza a tabela explicitamente marcada como 1º ao 10º quando houver
+    também a tabela resumida de 1º ao 5º.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        heading = table.find_previous(["h2", "h3", "h4", "h5", "h6"])
+        title = _clean(heading.get_text(" ", strip=True)) if heading else ""
+        draw_time = _dnp_draw_time_from_heading(title, lottery)
+        if not draw_time:
+            continue
+        if lottery == "PT-RIO" and draw_time != "09:20":
+            continue
+
+        # Só aceita tabelas de resultados do bicho; evita Super 5/links/quadros auxiliares.
+        labels = [_normalize_key(c.get_text(" ", strip=True)) for c in rows[0].find_all(["th", "td"])]
+        if not (any("prem" in x for x in labels) and any("milhar" in x for x in labels)):
+            continue
+
+        parsed = []
+        for tr in rows[1:]:
+            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
+            if len(cells) < 3:
+                continue
+            rankm = re.fullmatch(r"(10|[1-9])(?:º|°|o)?", cells[0], re.I)
+            if not rankm:
+                continue
+            numberm = re.search(r"(?<!\d)(\d{4})(?!\d)", cells[1])
+            groupm = re.search(r"\((\d{1,2})\)", " ".join(cells[2:]))
+            if not numberm or not groupm:
+                continue
+            prize = int(rankm.group(1))
+            group = int(groupm.group(1))
+            if not (1 <= prize <= 10 and 1 <= group <= 25):
+                continue
+            parsed.append({
+                "date": requested_day.isoformat(),
+                "lottery": lottery,
+                "draw_time": draw_time,
+                "prize": prize,
+                "number": numberm.group(1),
+                "group": f"{group:02d}",
+                "source": "deunopostenacional.com.br",
+            })
+        if not parsed:
+            continue
+        is_expanded = bool(re.search(r"1º\s*ao\s*10º|1º\s*ao\s*10", title, re.I)) or len(parsed) >= 8
+        results.append((draw_time, is_expanded, parsed))
+
+    by_time = {}
+    for draw_time, is_expanded, parsed in results:
+        old = by_time.get(draw_time)
+        if old is None or (is_expanded and not old[0]) or len(parsed) > len(old[1]):
+            by_time[draw_time] = (is_expanded, parsed)
+
+    out = []
+    for _, parsed in by_time.values():
+        out.extend(parsed)
+    unique = {}
+    for row in out:
+        key = (row["draw_time"], row["prize"])
+        old = unique.get(key)
+        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
+            raise HTTPException(502, detail={
+                "status": "dnp_source_conflict",
+                "date": requested_day.isoformat(),
+                "lottery": lottery,
+                "draw_time": row["draw_time"],
+                "prize": row["prize"],
+                "message": "A fonte Deu no Poste apresentou resultados conflitantes para a mesma apuração."
+            })
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
+
+
 RIO_URL = "https://www.ojogodobicho.com/deu_no_poste.htm"
 RIO_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com"}
 RIO_ARCHIVE_URL = "https://www.ojogodobicho.com/resultado"
@@ -1224,56 +1361,11 @@ def parse_rio_archive(html: str, requested_day: date):
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 
-@app.get("/api/rio-results")
-async def rio_results(draw_date: Optional[date] = Query(default=None)):
-    requested_day = draw_date or brazil_today()
-    source_url = ""
-    rows = []
-    # Keep the existing Rio source for today's draw, but catch source/network
-    # errors and try Resultado Fácil's explicit PT-RIO page as fallback.
-    if requested_day == brazil_today():
-        try:
-            source_url = RIO_URL
-            html = await fetch_html(source_url)
-            rows = parse_rio_page(html, requested_day)
-            now_local = datetime.now(BRAZIL_TZ)
-            rows = [r for r in rows if datetime.combine(
-                requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(),
-                tzinfo=BRAZIL_TZ) <= now_local]
-        except HTTPException:
-            rows = []
-    else:
-        try:
-            source_url = f"{RIO_ARCHIVE_URL}/{requested_day.year:04d}/{requested_day.month:02d}/{requested_day.day:02d}/"
-            html = await fetch_rio_archive(requested_day)
-            rows = parse_rio_archive(html, requested_day)
-        except HTTPException:
-            rows = []
-    if not rows:
-        rf_url = (f"https://www.resultadofacil.com.br/resultados-pt-rio-de-hoje"
-                  if requested_day == brazil_today() else
-                  f"https://www.resultadofacil.com.br/resultados-pt-rio-do-dia-{requested_day.isoformat()}-1ao10")
-        try:
-            rf_html = await fetch_html(rf_url)
-            rows = parse_resultado_facil_page(rf_html, requested_day, "PT-RIO")
-            source_url = rf_url
-        except HTTPException:
-            rows = []
-    if not rows:
-        raise HTTPException(404, detail={
-            "status":"rio_date_not_found_or_unparsed", "date":requested_day.isoformat(),
-            "source":source_url or "resultadofacil.com.br / ojogodobicho.com",
-            "message":"Não foi possível extrair resultados reconhecíveis do Rio para a data selecionada. Nenhum resultado de outra data foi usado."
-        })
-    return {"status":"ok", "lottery":"PT-RIO", "date":requested_day.isoformat(),
-            "source":source_url, "count":len(rows), "results":rows,
-            "note":"Resultados extraídos de tabelas da fonte; horários conforme identificados na página."}
-
 @app.get("/api/sources")
 def sources():
     return {
         "version": VERSION,
-        "existing": ["LOOK Goiás via ojogodobicho.com", "PT-RIO via deu_no_poste.htm (integração separada)"],
+        "existing": ["LOOK Goiás via Resultado Fácil GO", "PT-RIO via Resultado Fácil RJ"],
         "experimental": ["Arquivo diário multi-bancas com fallback entre resultadosorte.com e ojogodobiicho.com; cobertura depende dos nomes e formatos publicados pela fonte"],
         "requested_lotteries": list(LOTTERY_ALIASES.keys()),
         "note": "A presença de um nome na lista não confirma que a fonte publica resultados para ele."
@@ -1285,7 +1377,7 @@ def root():
         "service": APP_NAME,
         "status": "online",
         "version": VERSION,
-        "supported_source": "LOOK Goiás via fonte original; outras bancas tentam arquivo diário multi-fonte e só retornam registros extraídos explicitamente",
+        "supported_source": "LOOK Goiás via Resultado Fácil GO com fallback Deu no Poste Nacional; PT-RIO via Resultado Fácil RJ com fallback Deu no Poste Nacional",
         "supported_times": sorted(LOOK_TIMES),
         "note": "Parser histórico por data; confirme sempre na fonte. Sem garantia de palpites ou ganhos."
     }
@@ -1310,7 +1402,7 @@ async def results(
     draw_date: Optional[date] = Query(default=None),
     draw_time: Optional[str] = Query(default=None, pattern=r"^\d{2}:\d{2}$"),
 ):
-    normalized = lottery.strip().lower()
+    normalized = _normalize_key(lottery)
     if normalized not in {"look goiás", "look goias", "look"}:
         raise HTTPException(400, detail={"error": "lottery_not_supported", "supported": ["LOOK Goiás"]})
 
@@ -1318,19 +1410,7 @@ async def results(
     if draw_time and draw_time not in LOOK_TIMES:
         raise HTTPException(400, detail={"error": "draw_time_not_supported", "supported_times": sorted(LOOK_TIMES)})
 
-    url = validate_source_url(source_url_for(requested_day))
-    html = await fetch_html(url)
-    parsed = parse_look_page(html, requested_day)
-
-    # Do not return draws in the future according to Brazil local time when
-    # requesting today's date. Past-date archive records are unaffected.
-    if requested_day == brazil_today():
-        now_local = datetime.now(BRAZIL_TZ)
-        parsed = [
-            r for r in parsed
-            if datetime.combine(requested_day, datetime.strptime(r["draw_time"], "%H:%M").time(), tzinfo=BRAZIL_TZ) <= now_local
-        ]
-
+    parsed = await _oracle_fetch_look(requested_day)
     if draw_time:
         parsed = [r for r in parsed if r["draw_time"] == draw_time]
 
@@ -1340,19 +1420,33 @@ async def results(
             "lottery": "LOOK Goiás",
             "date": requested_day.isoformat(),
             "draw_time": draw_time,
-            "source": url,
-            "message": "Nenhum resultado publicado e validado foi encontrado para essa data/horário. Nenhum dado de outro dia foi reaproveitado."
+            "message": "Nenhum resultado publicado e validado foi encontrado para essa data/horário."
         })
 
     return {
         "status": "ok",
         "lottery": "LOOK Goiás",
         "date": requested_day.isoformat(),
-        "source": url,
+        "source": "resultadofacil.com.br / deunopostenacional.com.br",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "count": len(parsed),
         "results": parsed,
-        "note": "Confira os dados na fonte original. A extração depende da estrutura e disponibilidade do site."
+        "note": "Resultados priorizam Resultado Fácil e usam Deu no Poste Nacional como fallback do dia corrente."
+    }
+
+
+@app.get("/api/rio-results")
+async def rio_results(draw_date: Optional[date] = Query(default=None)):
+    requested_day = draw_date or brazil_today()
+    parsed = await _oracle_fetch_rio(requested_day)
+    return {
+        "status": "ok",
+        "lottery": "PT-RIO",
+        "date": requested_day.isoformat(),
+        "source": "resultadofacil.com.br / deunopostenacional.com.br",
+        "count": len(parsed),
+        "results": parsed,
+        "note": "Resultados priorizam Resultado Fácil RJ (1º ao 10º) e usam Deu no Poste Nacional das 9 horas como fallback do dia corrente."
     }
 
 
@@ -1429,78 +1523,52 @@ def _oracle_future_filter(rows: list[dict], day: date) -> list[dict]:
     return out
 
 async def _oracle_fetch_look(day: date):
-    # 1) Página ao vivo para hoje; arquivo por data para históricos.
-    candidates = []
-    if day == brazil_today():
-        candidates.append((LOOK_LIVE_URL, parse_look_page, "ojogodobicho.com"))
-    candidates.append((source_url_for(day), parse_look_page, "ojogodobicho.com"))
-
-    for url, parser, _source in candidates:
-        try:
-            html = await fetch_html(validate_source_url(url))
-            rows = _oracle_future_filter(parser(html, day), day)
-            if rows:
-                return rows
-        except HTTPException:
-            continue
-
-    # 2) Fonte alternativa que mantém blocos da LOOK por data recente.
+    # Fonte principal solicitada: Resultado Fácil GO.
     try:
-        html = await fetch_html(validate_source_url(LOOK_ALT_URL))
-        rows = _oracle_future_filter(parse_deunopostecarioca_look_page(html, day), day)
-        if rows:
-            return rows
-    except HTTPException:
-        pass
-
-    # 3) Último fallback do agregador. (A página atual não publica LOOK, mas
-    # mantemos a tentativa para não alterar o comportamento das demais fontes.)
-    try:
-        rows, _ = await fetch_resultado_sorte(day, "LOOK Goiás")
+        rows, _ = await fetch_resultado_facil(day, "LOOK Goiás")
         rows = _oracle_future_filter(rows, day)
         if rows:
             return rows
     except HTTPException:
         pass
 
-    raise HTTPException(404, f"LOOK Goiás sem resultados para {day.isoformat()}")
-
-async def _oracle_fetch_rio(day: date):
-    rows=[]
+    # Fallback solicitado: Deu no Poste Nacional / Look Loterias.
+    # A página consolidada é atual; por isso só a usamos para o dia corrente.
     if day == brazil_today():
         try:
-            html=await fetch_html(RIO_URL)
-            rows=parse_rio_page(html, day)
+            html = await fetch_dnp_html(DNP_LOOK_URL)
+            rows = _oracle_future_filter(parse_dnp_public_bicho_page(html, day, "LOOK Goiás"), day)
+            if rows:
+                return rows
         except HTTPException:
-            rows=[]
-    else:
+            pass
+
+    raise HTTPException(404, f"LOOK Goiás sem resultados para {day.isoformat()}")
+
+
+async def _oracle_fetch_rio(day: date):
+    # Fonte principal solicitada: Resultado Fácil RJ.
+    try:
+        rows, _ = await fetch_resultado_facil(day, "PT-RIO")
+        rows = _oracle_future_filter(rows, day)
+        if rows:
+            return rows
+    except HTTPException:
+        pass
+
+    # Fallback solicitado: Deu no Poste Nacional, página das 9 horas.
+    # Essa página cobre o PPT das 09:20; os demais horários continuam vindo
+    # do Resultado Fácil, inclusive no histórico.
+    if day == brazil_today():
         try:
-            html=await fetch_rio_archive(day)
-            rows=parse_rio_archive(html, day)
+            html = await fetch_dnp_html(DNP_RIO_URL)
+            rows = _oracle_future_filter(parse_dnp_public_bicho_page(html, day, "PT-RIO"), day)
+            if rows:
+                return rows
         except HTTPException:
-            rows=[]
-    if not rows:
-        try:
-            rows,_=await fetch_resultado_facil(day, "PT-RIO")
-        except HTTPException:
-            rows=[]
-    if not rows:
-        try:
-            rows,_=await fetch_resultado_sorte(day, "PT-RIO")
-        except HTTPException:
-            rows=[]
-    # ResultadoSorte é a alternativa preferencial do dia atual; se a página
-    # oficial e o agregador não responderem, usa o Portal Brasil.
-    if not rows and day == brazil_today():
-        try:
-            html=await fetch_html(validate_source_url(RIO_ALT_URL))
-            rows=parse_portalbrasil_rio_page(html, day)
-        except HTTPException:
-            rows=[]
-    rows=_oracle_future_filter(rows, day)
-    if not rows:
-        raise HTTPException(404, f"PT-RIO sem resultados para {day.isoformat()}")
-    return rows
+            pass
+
+    raise HTTPException(404, f"PT-RIO sem resultados para {day.isoformat()}")
 
 async def _oracle_fetch_aggregated(day: date, lottery: str):
     rows,_=await fetch_resultado_facil(day, lottery)
