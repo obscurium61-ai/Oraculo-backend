@@ -19,7 +19,7 @@ VERSION = "6.0.0-stateless-oraculo"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
-ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br"}
+ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br", "www.resultadosorte.com", "resultadosorte.com"}
 CACHE = {}
 LOOK_TIMES = {"07:20", "09:20", "11:20", "14:20", "16:20", "18:20", "21:20", "23:20"}
 
@@ -198,6 +198,132 @@ def parse_look_page(html: str, requested_day: date):
 
     return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
+
+# ---------------------------------------------------------------------------
+# Fallback específico do Oráculo: ResultadoSorte
+# Usado somente quando a fonte principal do Rio/LOOK falhar.
+# Não altera o cálculo do Oráculo nem as demais fontes.
+# ---------------------------------------------------------------------------
+RESULTADO_SORTE_BASE = "https://resultadosorte.com"
+RESULTADO_SORTE_HOSTS = {"resultadosorte.com", "www.resultadosorte.com"}
+RESULTADO_SORTE_LOOK_TIMES = {"07:20", "09:20", "11:20", "14:20", "16:20", "18:20", "21:20", "23:20"}
+RESULTADO_SORTE_RIO_TIMES = {"09:00", "11:00", "14:00", "16:00", "18:00", "21:00"}
+
+def _resultado_sorte_archive_url(day: date) -> str:
+    return f"{RESULTADO_SORTE_BASE}/arquivo/{day.isoformat()}/"
+
+def _normalize_resultado_sorte_time(value: str) -> str:
+    m = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", value or "")
+    if not m:
+        return ""
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+def parse_resultado_sorte_page(html: str, requested_day: date, lottery: str):
+    soup = BeautifulSoup(html, "html.parser")
+    target_times = RESULTADO_SORTE_LOOK_TIMES if lottery == "LOOK Goiás" else RESULTADO_SORTE_RIO_TIMES
+    results = []
+
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+
+        header_idx = None
+        time_by_col = {}
+        for ridx, tr in enumerate(rows[:4]):
+            cells = tr.find_all(["th", "td"])
+            found = {}
+            for cidx, cell in enumerate(cells):
+                draw_time = _normalize_resultado_sorte_time(_clean(cell.get_text(" ", strip=True)))
+                if draw_time in target_times:
+                    found[cidx] = draw_time
+            if len(found) >= 2:
+                header_idx, time_by_col = ridx, found
+                break
+
+        if header_idx is None:
+            continue
+
+        # Cada tabela relevante é uma banca; as linhas 1º-5º trazem
+        # "milhar grupo bicho" na mesma célula. O Oráculo usa os cinco
+        # prêmios principais, então não importamos a linha "Soma".
+        for tr in rows[header_idx + 1:]:
+            cells = tr.find_all(["th", "td"])
+            if not cells:
+                continue
+            first = _clean(cells[0].get_text(" ", strip=True))
+            rank_match = re.search(r"^\s*([1-5])\s*(?:º|°|o)?(?:\s|$)", first, re.I)
+            if not rank_match:
+                continue
+            prize = int(rank_match.group(1))
+
+            for col_idx, draw_time in time_by_col.items():
+                if col_idx >= len(cells):
+                    continue
+                cell_text = _clean(cells[col_idx].get_text(" ", strip=True))
+                match = re.search(r"(?<!\d)(\d{4})\s+(\d{1,2})(?:\s|$)", cell_text)
+                if not match:
+                    continue
+                number, group_raw = match.groups()
+                group = int(group_raw)
+                if not 1 <= group <= 25:
+                    continue
+
+                app_time = draw_time
+                if lottery == "PT-RIO":
+                    # ResultadoSorte usa 09/11/14/16/18/21; o Oráculo
+                    # historicamente trabalha com 09:20/11:20/14:20/...
+                    rio_map = {
+                        "09:00": "09:20", "11:00": "11:20", "14:00": "14:20",
+                        "16:00": "16:20", "18:00": "18:20", "21:00": "21:20",
+                    }
+                    app_time = rio_map.get(draw_time, draw_time)
+
+                results.append({
+                    "date": requested_day.isoformat(),
+                    "lottery": lottery,
+                    "draw_time": app_time,
+                    "prize": prize,
+                    "number": number,
+                    "group": f"{group:02d}",
+                    "source": "resultadosorte.com",
+                })
+
+    unique = {}
+    conflicts = []
+    for item in results:
+        key = (item["draw_time"], item["prize"])
+        previous = unique.get(key)
+        if previous is None:
+            unique[key] = item
+        elif previous["number"] != item["number"] or previous["group"] != item["group"]:
+            conflicts.append({
+                "draw_time": item["draw_time"],
+                "prize": item["prize"],
+                "values": [previous["number"], item["number"]],
+            })
+
+    if conflicts:
+        raise HTTPException(502, detail={
+            "status": "resultado_sorte_conflict",
+            "date": requested_day.isoformat(),
+            "lottery": lottery,
+            "conflicts": conflicts,
+            "message": "A fonte de fallback retornou valores conflitantes; resultados bloqueados."
+        })
+
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
+
+async def fetch_resultado_sorte(day: date, lottery: str):
+    url = _resultado_sorte_archive_url(day)
+    parsed = urlparse(url)
+    if parsed.hostname not in RESULTADO_SORTE_HOSTS:
+        raise HTTPException(400, "Fonte ResultadoSorte HTTPS não autorizada.")
+    html = await fetch_html(url)
+    rows = parse_resultado_sorte_page(html, day, lottery)
+    if not rows:
+        raise HTTPException(404, f"ResultadoSorte sem resultados para {lottery} em {day.isoformat()}")
+    return rows, url
 
 def brazil_today() -> date:
     return datetime.now(BRAZIL_TZ).date()
@@ -1198,9 +1324,18 @@ def _oracle_future_filter(rows: list[dict], day: date) -> list[dict]:
     return out
 
 async def _oracle_fetch_look(day: date):
-    url=validate_source_url(source_url_for(day))
-    html=await fetch_html(url)
-    rows=parse_look_page(html, day)
+    # Mantém a fonte original. O fallback só entra se ela falhar/bloquear.
+    try:
+        url = validate_source_url(source_url_for(day))
+        html = await fetch_html(url)
+        rows = parse_look_page(html, day)
+        rows = _oracle_future_filter(rows, day)
+        if rows:
+            return rows
+    except HTTPException:
+        pass
+
+    rows, _ = await fetch_resultado_sorte(day, "LOOK Goiás")
     return _oracle_future_filter(rows, day)
 
 async def _oracle_fetch_rio(day: date):
@@ -1220,6 +1355,11 @@ async def _oracle_fetch_rio(day: date):
     if not rows:
         try:
             rows,_=await fetch_resultado_facil(day, "PT-RIO")
+        except HTTPException:
+            rows=[]
+    if not rows:
+        try:
+            rows,_=await fetch_resultado_sorte(day, "PT-RIO")
         except HTTPException:
             rows=[]
     rows=_oracle_future_filter(rows, day)
