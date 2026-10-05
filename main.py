@@ -19,7 +19,7 @@ VERSION = "6.0.0-stateless-oraculo"
 BRAZIL_TZ = ZoneInfo("America/Sao_Paulo")
 CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "120"))
 ARCHIVE_URL = "https://www.ojogodobicho.com/look/resultados-anteriores.htm"
-ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br", "www.deunopostenacional.com.br", "deunopostenacional.com.br"}
+ALLOWED_HOSTS = {"www.ojogodobicho.com", "ojogodobicho.com", "ojogodobiicho.com", "www.ojogodobiicho.com", "www.resultadofacil.com.br", "resultadofacil.com.br"}
 CACHE = {}
 LOOK_TIMES = {"07:20", "09:20", "11:20", "14:20", "16:20", "18:20", "21:20", "23:20"}
 
@@ -631,168 +631,85 @@ def parse_ptsp_archive(html: str, requested_day: date):
 # ---------------------------------------------------------------------------
 RESULTADO_FACIL_BASE = "https://www.resultadofacil.com.br"
 
-def resultado_facil_urls(day: date, lottery: str, expanded: bool = True) -> list[str]:
-    """Builds the Result Fácil candidates for the selected date."""
-    if lottery == "Para Todos-SP":
-        return [f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/sp/do-dia/{day.isoformat()}"]
-    if lottery == "PT-RIO":
-        base = f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/rj"
-    elif lottery == "LOOK Goiás":
-        base = f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/go"
-    else:
-        suffix = "-1ao10" if expanded else ""
-        return [f"{RESULTADO_FACIL_BASE}/resultados-loteria-nacional-do-dia-{day.isoformat()}{suffix}"]
-
-    if day == brazil_today():
-        return [base]
-
-    urls = [
-        f"{base}/do-dia/{day.isoformat()}",
-        f"{base}/{day.isoformat()}",
-        f"{base}?data={day.isoformat()}",
-        f"{base}?date={day.isoformat()}",
-    ]
-    if day == brazil_today() - __import__("datetime").timedelta(days=1):
-        urls.insert(0, f"{base}/de-ontem")
-    return urls
-
-# Backward-compatible helper kept for the existing SP/Nacional integrations.
 def resultado_facil_url(day: date, lottery: str, expanded: bool = True) -> str:
-    return resultado_facil_urls(day, lottery, expanded)[0]
-
-
-def _rf_heading_ok(text: str) -> bool:
-    norm = _normalize_key(text)
-    if "resultado do jogo do bicho" not in norm and "resultado jogo do bicho" not in norm:
-        return False
-    return bool(re.search(r"(?<!\d)\d{1,2}(?::\d{2})?(?:\s*h(?:\s*\d{2}\s*min)?)?(?!\d)", text, re.I))
-
-
-def _rf_heading_for_table(table) -> str:
-    # Do not depend on a specific Bootstrap container class. Result Fácil has
-    # changed its wrappers while keeping the result heading itself stable.
-    for node in table.find_all_previous(["h1", "h2", "h3", "h4", "h5", "h6"]):
-        text = _clean(node.get_text(" ", strip=True))
-        if _rf_heading_ok(text):
-            return text
-    for node in table.find_all_previous(["p", "strong", "b", "div", "span"]):
-        text = _clean(node.get_text(" ", strip=True))
-        if len(text) <= 220 and _rf_heading_ok(text):
-            return text
-    return ""
-
-
-def _rf_page_dates(soup) -> set[date]:
-    found = set()
-    text = soup.get_text(" ", strip=True)
-    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", text):
-        try:
-            found.add(date(int(yyyy), int(mm), int(dd)))
-        except ValueError:
-            pass
-    return found
-
+    if lottery == "Para Todos-SP":
+        return f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/sp/do-dia/{day.isoformat()}"
+    # The historical National route has a dedicated date slug; try the expanded
+    # page first and the ordinary date page as a fallback.
+    suffix = "-1ao10" if expanded else ""
+    return f"{RESULTADO_FACIL_BASE}/resultados-loteria-nacional-do-dia-{day.isoformat()}{suffix}"
 
 def parse_resultado_facil_page(html: str, requested_day: date, lottery: str):
     soup = BeautifulSoup(html, "html.parser")
-    dates_on_page = _rf_page_dates(soup)
-    # Avoid silently labeling a different date as the requested date when an
-    # old URL redirects to the current page.
-    if dates_on_page and requested_day not in dates_on_page:
-        raise HTTPException(502, detail={
-            "status": "resultado_facil_date_mismatch",
-            "requested_date": requested_day.isoformat(),
-            "page_dates": sorted(d.isoformat() for d in dates_on_page)[:12],
-            "message": "O Resultado Fácil retornou uma página de outra data."
-        })
-
     results = []
+    # Resultado Fácil uses a heading immediately before each draw table.
     for table in soup.find_all("table"):
-        heading_text = _rf_heading_for_table(table)
-        if not heading_text:
-            continue
-        norm = _normalize_key(heading_text)
-
+        # Resultado Fácil places each draw title inside a card/container,
+        # often as a paragraph/div rather than an h2-h5 heading.
+        container = table.find_parent(class_=lambda c: c and any(
+            token in (c if isinstance(c, str) else " ".join(c))
+            for token in ("mb-5", "result", "card", "col-md", "col-lg")
+        ))
+        heading = None
+        if container:
+            heading = container.find(["h1", "h2", "h3", "h4", "h5", "h6", "p", "strong", "b"])
+            if not heading:
+                # use the first short text-bearing element before the table
+                for node in container.find_all(["div", "span", "p", "strong", "b"]):
+                    if node.find("table") is None:
+                        candidate = _clean(node.get_text(" ", strip=True))
+                        if candidate and len(candidate) < 180:
+                            heading = node
+                            break
+        if heading is None:
+            heading = table.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
+        heading_text = _clean(heading.get_text(" ", strip=True)) if heading else ""
+        norm_heading = _normalize_key(heading_text)
         if lottery == "Para Todos-SP":
-            if not any(x in norm for x in ("sao paulo", "ptsp", "bandeirantes", "pt sp", "para todos")):
+            if not any(x in norm_heading for x in ("sao paulo", "sp ", "ptsp", "bandeirantes", "pt sp")):
                 continue
             canonical = "Para Todos-SP"
-            code = None
         elif lottery == "PT-RIO":
-            code = None
-            for c in ("PPT", "PTM", "PTV", "PTN", "CORUJA", "COR", "PT"):
-                if re.search(rf"(?<![A-Z]){re.escape(c)}(?![A-Z])", heading_text, re.I):
-                    code = c
-                    break
-            # Result Fácil labels the first RJ draw as PT at 09:20.
-            if code is None and re.search(r"\b09:20\b", heading_text):
-                code = "PPT"
-            if code is None or not any(x in norm for x in (" rio ", " rj", "rio de janeiro", "ptm", "ptv", "ptn", "ppt", "coruja")):
+            if not any(x in norm_heading for x in ("rio", "pt-rio", "pt rio")):
                 continue
             canonical = "PT-RIO"
-        elif lottery == "LOOK Goiás":
-            if not any(x in norm for x in ("look", "goias")):
-                continue
-            canonical = "LOOK Goiás"
         else:
-            if not ("nacional" in norm or re.search(r"\bln\b", norm)):
+            if not ("nacional" in norm_heading or re.search(r"\bln\b", norm_heading)):
                 continue
             canonical = "LNS Nacional"
-            code = None
 
         tm = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", heading_text)
         if tm:
             draw_time = f"{int(tm.group(1)):02d}:{tm.group(2)}"
         else:
-            tm = re.search(r"\b(\d{1,2})\s*h\s*(?:(\d{2})\s*min)?\b", heading_text, re.I)
-            if not tm:
-                tm = re.search(r"\b(\d{1,2})\s*(?:hs|h)\b", heading_text, re.I)
-                if not tm:
-                    continue
+            # Some headers show only "08hs", "10hs", etc.
+            tm = re.search(r"\b(\d{1,2})\s*(?:hs|h)\b", heading_text, re.I)
+            if tm:
                 draw_time = f"{int(tm.group(1)):02d}:00"
             else:
-                draw_time = f"{int(tm.group(1)):02d}:{int(tm.group(2) or 0):02d}"
-
-        if canonical == "PT-RIO":
-            draw_time = {
-                "PPT": "09:20", "PTM": "11:20", "PT": "14:20",
-                "PTV": "16:20", "PTN": "18:20", "CORUJA": "21:20", "COR": "21:20",
-            }.get(code, draw_time)
-        elif canonical == "LOOK Goiás":
-            hour = int(draw_time[:2])
-            if hour in {7, 9, 11, 14, 16, 18, 21, 23}:
-                draw_time = f"{hour:02d}:20"
+                continue
 
         rows = table.find_all("tr")
         if not rows:
             continue
-        header_idx = None
-        headers = []
-        for ridx, row in enumerate(rows[:3]):
-            candidate = [_normalize_key(c.get_text(" ", strip=True)) for c in row.find_all(["th", "td"])]
-            if any("milhar" in h for h in candidate) and any("grupo" in h for h in candidate):
-                header_idx, headers = ridx, candidate
-                break
-        if header_idx is None:
+        headers = [_normalize_key(c.get_text(" ", strip=True)) for c in rows[0].find_all(["th","td"])]
+        # Accept the Resultado Fácil column order only when explicitly labeled.
+        if not (any(("prem" in h or ("pr" in h and "mio" in h)) for h in headers) and any("milhar" in h for h in headers) and any("grupo" in h for h in headers)):
             continue
-        try:
-            idx_prize = next(i for i,h in enumerate(headers) if ("prem" in h or ("pr" in h and "mio" in h)))
-            idx_num = next(i for i,h in enumerate(headers) if "milhar" in h)
-            idx_group = next(i for i,h in enumerate(headers) if "grupo" in h)
-        except StopIteration:
-            continue
-
-        for tr in rows[header_idx + 1:]:
-            cells = tr.find_all(["td", "th"])
-            if max(idx_prize, idx_num, idx_group) >= len(cells):
+        idx_prize = next(i for i,h in enumerate(headers) if ("prem" in h or ("pr" in h and "mio" in h)))
+        idx_num = next(i for i,h in enumerate(headers) if "milhar" in h)
+        idx_group = next(i for i,h in enumerate(headers) if "grupo" in h)
+        for tr in rows[1:]:
+            cells = tr.find_all(["td","th"])
+            if max(idx_prize,idx_num,idx_group) >= len(cells):
                 continue
-            rank_text = _clean(cells[idx_prize].get_text(" ", strip=True))
-            rm = re.match(r"\s*(10|[1-9])(?:º|°|o)?", rank_text, re.I)
+            rank_text = _clean(cells[idx_prize].get_text(" ",strip=True))
+            rm = re.match(r"\s*(10|[1-9])", rank_text)
             if not rm:
                 continue
             prize = int(rm.group(1))
-            number = re.sub(r"\D", "", _clean(cells[idx_num].get_text(" ", strip=True)))
-            group = re.sub(r"\D", "", _clean(cells[idx_group].get_text(" ", strip=True)))
+            number = re.sub(r"\D","",_clean(cells[idx_num].get_text(" ",strip=True)))
+            group = re.sub(r"\D","",_clean(cells[idx_group].get_text(" ",strip=True)))
             if len(number) != 4 or not group:
                 continue
             try:
@@ -812,33 +729,34 @@ def parse_resultado_facil_page(html: str, requested_day: date, lottery: str):
                 "validation": "resultado_facil_labeled_table",
             })
 
+    # Prefer the expanded 1º-10º version where the page duplicates a draw with
+    # a 1º-5º table and a 1º-10º table.
     by_draw = {}
     for row in results:
         key = row["draw_time"]
         by_draw.setdefault(key, {})
         old = by_draw[key].get(row["prize"])
-        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
+        if old and old["number"] != row["number"]:
+            # Ignore conflict only if one is from the shorter duplicate? Both
+            # tables should share the first five prizes; conflicting rows are
+            # not safe to use.
             raise HTTPException(502, detail={
-                "status": "resultado_facil_conflict", "date": requested_day.isoformat(),
-                "lottery": lottery, "draw_time": key, "prize": row["prize"],
-                "message": "A fonte Resultado Fácil retornou prêmios conflitantes."
+                "status":"resultado_facil_conflict","date":requested_day.isoformat(),
+                "lottery":lottery,"draw_time":key,"prize":row["prize"],
+                "message":"A fonte Resultado Fácil retornou prêmios conflitantes."
             })
         by_draw[key][row["prize"]] = row
-    return sorted([r for draw in by_draw.values() for r in draw.values()], key=lambda r:(r["draw_time"], r["prize"]))
-
+    return sorted([r for draw in by_draw.values() for r in draw.values()],
+                  key=lambda r:(r["draw_time"],r["prize"]))
 
 async def fetch_resultado_facil(day: date, lottery: str):
-    urls = resultado_facil_urls(day, lottery, True)
+    urls = [resultado_facil_url(day, lottery, True)]
     if lottery == "LNS Nacional":
-        urls += [resultado_facil_url(day, lottery, False)]
+        urls.append(resultado_facil_url(day, lottery, False))
         if day == brazil_today():
             urls.append(f"{RESULTADO_FACIL_BASE}/resultados-loteria-nacional-de-hoje")
-    seen = set()
     errors = []
     for url in urls:
-        if url in seen:
-            continue
-        seen.add(url)
         try:
             html = await fetch_html(url)
             rows = parse_resultado_facil_page(html, day, lottery)
@@ -846,15 +764,12 @@ async def fetch_resultado_facil(day: date, lottery: str):
                 return rows, url
             errors.append(f"{url}: sem linhas reconhecidas")
         except HTTPException as exc:
-            detail = exc.detail
-            if isinstance(detail, dict):
-                detail = detail.get("message", "consulta falhou")
-            errors.append(f"{url}: {detail}")
+            errors.append(f"{url}: consulta falhou")
     raise HTTPException(404, detail={
-        "status": "resultado_facil_no_rows", "date": day.isoformat(), "lottery": lottery,
-        "sources": urls,
-        "message": "Resultado Fácil consultado, mas não foi possível extrair resultados reconhecíveis para a data selecionada.",
-        "attempts": errors
+        "status":"resultado_facil_no_rows","date":day.isoformat(),"lottery":lottery,
+        "sources":urls,
+        "message":"Resultado Fácil consultado, mas não foi possível extrair resultados reconhecíveis para a data selecionada.",
+        "attempts":errors
     })
 
 
@@ -1211,63 +1126,6 @@ async def results(
 
 
 # ---------------------------------------------------------------------------
-# Fallback pedido para Rio/LOOK: Deu no Poste Nacional.
-# É usado apenas quando o Resultado Fácil não entregar dados.
-# ---------------------------------------------------------------------------
-DNP_RIO_URL = "https://deunopostenacional.com.br/deu-no-poste/9-horas/"
-DNP_LOOK_URL = "https://deunopostenacional.com.br/look-loterias/"
-
-
-def _dnp_time_from_title(title: str) -> str:
-    m = re.search(r"\((\d{1,2})\s*h\s*(\d{1,2})\s*min", title, re.I)
-    if m:
-        return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
-    m = re.search(r"\b(\d{1,2})\s*h\b", title, re.I)
-    if m:
-        return f"{int(m.group(1)):02d}:20"
-    return ""
-
-
-def parse_dnp_page(html: str, requested_day: date, lottery: str):
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        if len(rows) < 2:
-            continue
-        heading = table.find_previous(["h2", "h3", "h4", "h5", "h6"])
-        title = _clean(heading.get_text(" ", strip=True)) if heading else ""
-        draw_time = _dnp_time_from_title(title)
-        if not draw_time:
-            continue
-        if lottery == "PT-RIO" and draw_time != "09:20":
-            continue
-        labels = [_normalize_key(c.get_text(" ", strip=True)) for c in rows[0].find_all(["th", "td"])]
-        if not (any("prem" in x for x in labels) and any("milhar" in x for x in labels)):
-            continue
-        for tr in rows[1:]:
-            cells = [_clean(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
-            if len(cells) < 3:
-                continue
-            rank = re.fullmatch(r"(10|[1-9])(?:º|°|o)?", cells[0], re.I)
-            if not rank:
-                continue
-            nm = re.search(r"(?<!\d)(\d{4})(?!\d)", cells[1])
-            gm = re.search(r"\((\d{1,2})\)", " ".join(cells[2:]))
-            if not nm or not gm:
-                continue
-            prize, group = int(rank.group(1)), int(gm.group(1))
-            if not 1 <= prize <= 10 or not 1 <= group <= 25:
-                continue
-            results.append({
-                "date": requested_day.isoformat(), "lottery": lottery, "draw_time": draw_time,
-                "prize": prize, "number": nm.group(1), "group": f"{group:02d}",
-                "source": "deunopostenacional.com.br"
-            })
-    unique = {(r["draw_time"], r["prize"]): r for r in results}
-    return sorted(unique.values(), key=lambda r:(r["draw_time"], r["prize"]))
-
-# ---------------------------------------------------------------------------
 # Oráculo stateless bridge
 # Sem Supabase, sem banco de aprendizagem e sem tarefas em segundo plano.
 # O servidor somente consulta as fontes externas e entrega os dados ao HTML.
@@ -1340,47 +1198,34 @@ def _oracle_future_filter(rows: list[dict], day: date) -> list[dict]:
     return out
 
 async def _oracle_fetch_look(day: date):
-    # Fonte principal: Resultado Fácil GO, inclusive para datas anteriores.
-    try:
-        rows, _ = await fetch_resultado_facil(day, "LOOK Goiás")
-        rows = _oracle_future_filter(rows, day)
-        if rows:
-            return rows
-    except HTTPException:
-        pass
-
-    # Fallback: Deu no Poste Nacional. A página consolidada é do dia corrente.
-    if day == brazil_today():
-        try:
-            html = await fetch_html(DNP_LOOK_URL)
-            rows = _oracle_future_filter(parse_dnp_page(html, day, "LOOK Goiás"), day)
-            if rows:
-                return rows
-        except HTTPException:
-            pass
-    raise HTTPException(404, f"LOOK Goiás sem resultados para {day.isoformat()}")
-
+    url=validate_source_url(source_url_for(day))
+    html=await fetch_html(url)
+    rows=parse_look_page(html, day)
+    return _oracle_future_filter(rows, day)
 
 async def _oracle_fetch_rio(day: date):
-    # Fonte principal: Resultado Fácil RJ, inclusive para datas anteriores.
-    try:
-        rows, _ = await fetch_resultado_facil(day, "PT-RIO")
-        rows = _oracle_future_filter(rows, day)
-        if rows:
-            return rows
-    except HTTPException:
-        pass
-
-    # Fallback: Deu no Poste Nacional / 9 horas (PPT).
+    rows=[]
     if day == brazil_today():
         try:
-            html = await fetch_html(DNP_RIO_URL)
-            rows = _oracle_future_filter(parse_dnp_page(html, day, "PT-RIO"), day)
-            if rows:
-                return rows
+            html=await fetch_html(RIO_URL)
+            rows=parse_rio_page(html, day)
         except HTTPException:
-            pass
-    raise HTTPException(404, f"PT-RIO sem resultados para {day.isoformat()}")
+            rows=[]
+    else:
+        try:
+            html=await fetch_rio_archive(day)
+            rows=parse_rio_archive(html, day)
+        except HTTPException:
+            rows=[]
+    if not rows:
+        try:
+            rows,_=await fetch_resultado_facil(day, "PT-RIO")
+        except HTTPException:
+            rows=[]
+    rows=_oracle_future_filter(rows, day)
+    if not rows:
+        raise HTTPException(404, f"PT-RIO sem resultados para {day.isoformat()}")
+    return rows
 
 async def _oracle_fetch_aggregated(day: date, lottery: str):
     rows,_=await fetch_resultado_facil(day, lottery)
