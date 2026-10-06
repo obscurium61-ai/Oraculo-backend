@@ -634,7 +634,15 @@ RESULTADO_FACIL_BASE = "https://www.resultadofacil.com.br"
 
 def resultado_facil_urls(day: date, lottery: str, expanded: bool = True) -> list[str]:
     if lottery == "Para Todos-SP":
-        return [f"{RESULTADO_FACIL_BASE}/resultado-do-jogo-do-bicho/sp/do-dia/{day.isoformat()}"]
+        # PT-SP uses its own Resultado Fácil archive path.  The generic /sp/do-dia/
+        # route is not the PT-SP archive and may return another SP board.
+        urls = []
+        if day == brazil_today():
+            urls.append(f"{RESULTADO_FACIL_BASE}/resultados-da-banca-pt-sp")
+        urls.append(f"{RESULTADO_FACIL_BASE}/resultados-pt-sp-do-dia-{day.isoformat()}")
+        if expanded:
+            urls.append(f"{RESULTADO_FACIL_BASE}/resultados-pt-sp-do-dia-{day.isoformat()}-1ao10")
+        return urls
     if lottery == "PT-RIO":
         # Página por estado para Rio; a mesma rota aceita histórico por data.
         if day == brazil_today():
@@ -700,6 +708,135 @@ def _rf_normalize_draw_time(lottery: str, raw: str, heading_text: str = "") -> s
         if t == "21:30": return "21:20"
         if t == "11:30": return "11:20"
     return t
+
+
+def _parse_ptsp_draw_time(text: str) -> str:
+    norm = _normalize_key(text)
+    # Resultado Fácil labels PT-SP as 08hs/10hs/12hs/13hs/15hs/17hs/19hs/20hs.
+    m = re.search(r"\b0?(8|10|12|13|15|17|19|20)\s*h(?:s|oras)?\b", norm)
+    if m:
+        return f"{int(m.group(1)):02d}:20"
+    m = re.search(r"\b0?(8|10|12|13|15|17|19|20)\s*[:.]\s*20\b", norm)
+    if m:
+        return f"{int(m.group(1)):02d}:20"
+    return ""
+
+
+def parse_ptsp_resultado_facil_page(html: str, requested_day: date):
+    """Parse the dedicated Resultado Fácil PT-SP pages.
+
+    The PT-SP archive uses headings such as 'SP, 08hs - PTSP' and
+    expanded tables marked '1º ao 10º'. Both the five-prize and ten-prize
+    tables may appear on the same page; keep the 1º-10º table when present.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    page_text = _clean(soup.get_text(" ", strip=True))
+
+    dates = set()
+    for dd, mm, yyyy in re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", page_text):
+        try:
+            dates.add(date(int(yyyy), int(mm), int(dd)))
+        except ValueError:
+            pass
+    if len(dates) == 1 and requested_day not in dates:
+        raise HTTPException(502, detail={
+            "status": "resultado_facil_ptsp_date_mismatch",
+            "requested_date": requested_day.isoformat(),
+            "page_dates": [d.isoformat() for d in dates],
+            "message": "O Resultado Fácil retornou outra data para o PT-SP."
+        })
+
+    selected = {}
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        heading = ""
+        for node in table.find_all_previous(["h1", "h2", "h3", "h4", "h5", "h6", "p", "strong", "b"]):
+            candidate = _clean(node.get_text(" ", strip=True))
+            candidate_norm = _normalize_key(candidate)
+            if candidate and len(candidate) <= 280 and (re.search(r"\bptsp\b", candidate_norm) or re.search(r"\bpt\s+sp\b", candidate_norm) or "bandeirantes" in candidate_norm or "ptn sp" in candidate_norm):
+                heading = candidate
+                break
+        norm = _normalize_key(heading)
+        # PT-SP pages use PTSP/PT-SP, and also include Bandeirantes/PTN-SP boards.
+        if not (re.search(r"\bptsp\b", norm) or re.search(r"\bpt\s+sp\b", norm) or "bandeirantes" in norm or "ptn sp" in norm):
+            continue
+        draw_time = _parse_ptsp_draw_time(heading)
+        if not draw_time:
+            continue
+
+        header_idx = None
+        headers = []
+        for ridx, tr in enumerate(rows[:4]):
+            candidate = [_normalize_key(c.get_text(" ", strip=True)) for c in tr.find_all(["th", "td"])]
+            if any("prem" in h for h in candidate) and any("milhar" in h for h in candidate) and any("grupo" in h for h in candidate):
+                header_idx, headers = ridx, candidate
+                break
+        if header_idx is None:
+            continue
+
+        try:
+            idx_prize = next(i for i, h in enumerate(headers) if "prem" in h)
+            idx_num = next(i for i, h in enumerate(headers) if "milhar" in h)
+            idx_group = next(i for i, h in enumerate(headers) if "grupo" in h)
+        except StopIteration:
+            continue
+
+        rows_for_time = []
+        full_table = bool(re.search(r"1\s*ao\s*10", norm))
+        for tr in rows[header_idx + 1:]:
+            cells = tr.find_all(["td", "th"])
+            if max(idx_prize, idx_num, idx_group) >= len(cells):
+                continue
+            rank_text = _clean(cells[idx_prize].get_text(" ", strip=True))
+            rm = re.match(r"\s*(10|[1-9])(?:º|°|o)?", rank_text, re.I)
+            if not rm:
+                continue
+            prize = int(rm.group(1))
+            number = re.sub(r"\D", "", _clean(cells[idx_num].get_text(" ", strip=True)))
+            group = re.sub(r"\D", "", _clean(cells[idx_group].get_text(" ", strip=True)))
+            if len(number) != 4 or not group:
+                continue
+            try:
+                group_num = int(group)
+            except ValueError:
+                continue
+            if not 1 <= group_num <= 25:
+                continue
+            rows_for_time.append({
+                "date": requested_day.isoformat(),
+                "lottery": "Para Todos-SP",
+                "draw_time": draw_time,
+                "prize": prize,
+                "number": number.zfill(4),
+                "group": f"{group_num:02d}",
+                "source": "resultadofacil.com.br",
+            })
+
+        if rows_for_time:
+            old = selected.get(draw_time)
+            # Prefer an explicit 1º-10º table; otherwise keep the first valid board.
+            if old is None or (full_table and not old[0]) or (full_table == old[0] and len(rows_for_time) > len(old[1])):
+                selected[draw_time] = (full_table, rows_for_time)
+
+    out = []
+    for _, rows_for_time in selected.values():
+        out.extend(rows_for_time)
+    unique = {}
+    for row in out:
+        key = (row["draw_time"], row["prize"])
+        old = unique.get(key)
+        if old and (old["number"] != row["number"] or old["group"] != row["group"]):
+            raise HTTPException(502, detail={
+                "status": "resultado_facil_ptsp_conflict",
+                "date": requested_day.isoformat(),
+                "draw_time": row["draw_time"],
+                "prize": row["prize"],
+                "message": "O Resultado Fácil retornou valores conflitantes para o PT-SP."
+            })
+        unique[key] = row
+    return sorted(unique.values(), key=lambda r: (r["draw_time"], r["prize"]))
 
 
 def parse_resultado_facil_page(html: str, requested_day: date, lottery: str):
@@ -803,6 +940,148 @@ async def fetch_resultado_facil(day: date, lottery: str):
             if isinstance(detail,dict): detail=detail.get("message","consulta falhou")
             errors.append(f"{url}: {detail}")
     raise HTTPException(404, detail={"status":"resultado_facil_no_rows","date":day.isoformat(),"lottery":lottery,"sources":urls,"message":"Não foi possível extrair resultados do Resultado Fácil para a data selecionada.","attempts":errors})
+
+
+def parse_meujogodobicho_sp_page(html: str, requested_day: date):
+    """Parse MeuJogoDoBicho SP pages, preferring 1º-10º sections.
+    Used only as PT-SP fallback.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    for section in soup.find_all(["h2", "h3"]):
+        title = _clean(section.get_text(" ", strip=True))
+        norm = _normalize_key(title)
+        if "sorteio" not in norm:
+            continue
+        tm = re.search(r"(\d{1,2})h(?:ora)?(?:s)?(?:(?:\s*)20)?", norm)
+        if not tm:
+            tm2 = re.search(r"(\d{1,2})[:.]20", norm)
+            if not tm2:
+                continue
+            hour = int(tm2.group(1))
+        else:
+            hour = int(tm.group(1))
+        draw_time = f"{hour:02d}:20"
+        full = "1 ao 10" in norm
+        # Find the nearest ordered list-like block after the heading.
+        node = section.find_next(["div", "section", "ul", "ol"])
+        if not node:
+            continue
+        text = _clean(node.get_text(" ", strip=True))
+        matches = re.findall(r"(?:(10|[1-9])º)\s+(\d{4})\s+[^()]{1,80}\((\d{1,2})\)", text)
+        rows = []
+        for prize_s, number, group_s in matches:
+            prize = int(prize_s); group = int(group_s)
+            if not (1 <= prize <= 10 and 1 <= group <= 25):
+                continue
+            rows.append({"date": requested_day.isoformat(), "lottery": "Para Todos-SP", "draw_time": draw_time, "prize": prize, "number": number, "group": f"{group:02d}", "source": "meujogodobicho.com.br"})
+        if rows:
+            key = draw_time
+            old = next((r for r in out if r["draw_time"] == key and r["prize"] == rows[0]["prize"]), None)
+            # Store both tables for now; dedupe below prefers the 1º-10º table.
+            for r in rows:
+                r["_full_table"] = full
+            out.extend(rows)
+    # Prefer full ten-prize tables and remove the internal marker.
+    best = {}
+    for r in out:
+        k = (r["draw_time"], r["prize"])
+        old = best.get(k)
+        if old is None or (r.get("_full_table") and not old.get("_full_table")):
+            best[k] = r
+    result = []
+    for r in best.values():
+        r.pop("_full_table", None)
+        result.append(r)
+    return sorted(result, key=lambda r: (r["draw_time"], r["prize"]))
+
+
+PTSP_RF_TODAY_URL = "https://www.resultadofacil.com.br/resultados-da-banca-pt-sp"
+PTSP_DNP_URL = "https://deunopostenacional.com.br/jogo-do-bicho-sao-paulo/"
+PTSP_DNP_TODAY_URL = "https://deunopostenacional.com.br/jogo-do-bicho-sao-paulo/hoje/"
+PTSP_MJB_URL = "https://www.meujogodobicho.com.br/sp/"
+PTSP_MJB_YESTERDAY_URL = "https://www.meujogodobicho.com.br/sp/resultado-jogo-bicho-ontem/"
+
+
+async def fetch_ptsp_results(day: date):
+    """Dedicated PT-SP source chain. Only this lottery uses this function.
+
+    Historical dates use the dated Resultado Fácil PT-SP archive first.
+    The other requested servers remain fallbacks and are never used to alter
+    any other lottery's data flow.
+    """
+    rf_urls = resultado_facil_urls(day, "Para Todos-SP", True)
+    # Keep the exact user-requested base URL first for the current day.
+    if day == brazil_today():
+        rf_urls = [PTSP_RF_TODAY_URL] + [u for u in rf_urls if u != PTSP_RF_TODAY_URL]
+    errors = []
+    for url in rf_urls:
+        try:
+            html = await fetch_html(url)
+            rows = parse_ptsp_resultado_facil_page(html, day)
+            if rows:
+                return rows, url
+            errors.append(f"{url}: sem linhas PT-SP reconhecidas")
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get("message", "consulta falhou")
+            errors.append(f"{url}: {detail}")
+
+    # Deu no Poste Nacional: current PT-SP board. It is also useful as a
+    # fallback for yesterday through its historical page when present.
+    dnp_urls = []
+    if day == brazil_today():
+        dnp_urls.extend([PTSP_DNP_URL, PTSP_DNP_TODAY_URL])
+    elif day == brazil_today() - timedelta(days=1):
+        dnp_urls.extend([PTSP_DNP_TODAY_URL, PTSP_DNP_URL])
+    for url in dnp_urls:
+        try:
+            html = await fetch_html(url)
+            rows = parse_ptsp_resultado_facil_page(html, day)
+            if rows:
+                return rows, url
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get("message", "consulta falhou")
+            errors.append(f"{url}: {detail}")
+
+    # Meu Jogo do Bicho exposes a dedicated yesterday page with the complete
+    # 1º-10º boards, which makes it a strong fallback for the immediately
+    # preceding day. For older dates, Resultado Fácil remains the source of truth.
+    if day == brazil_today() - timedelta(days=1):
+        try:
+            html = await fetch_html(PTSP_MJB_YESTERDAY_URL)
+            rows = parse_meujogodobicho_sp_page(html, day)
+            if rows:
+                return rows, PTSP_MJB_YESTERDAY_URL
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get("message", "consulta falhou")
+            errors.append(f"{PTSP_MJB_YESTERDAY_URL}: {detail}")
+
+    # The /sp/ root is an additional current-day fallback.
+    if day == brazil_today():
+        try:
+            html = await fetch_html(PTSP_MJB_URL)
+            rows = parse_meujogodobicho_sp_page(html, day)
+            if rows:
+                return rows, PTSP_MJB_URL
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get("message", "consulta falhou")
+            errors.append(f"{PTSP_MJB_URL}: {detail}")
+
+    raise HTTPException(404, detail={
+        "status": "ptsp_no_results",
+        "date": day.isoformat(),
+        "sources": rf_urls + dnp_urls + ([PTSP_MJB_YESTERDAY_URL] if day == brazil_today() - timedelta(days=1) else []) + ([PTSP_MJB_URL] if day == brazil_today() else []),
+        "message": "Não foi possível extrair resultados do Para Todos-SP para a data selecionada.",
+        "attempts": errors,
+    })
 
 
 # Fontes solicitadas para Rio e LOOK.
@@ -1253,7 +1532,10 @@ async def _oracle_fetch_rio(day: date):
     return _oracle_future_filter(rows, day)
 
 async def _oracle_fetch_aggregated(day: date, lottery: str):
-    rows,_=await fetch_resultado_facil(day, lottery)
+    if lottery == "Para Todos-SP":
+        rows,_ = await fetch_ptsp_results(day)
+    else:
+        rows,_ = await fetch_resultado_facil(day, lottery)
     return _oracle_future_filter(rows, day)
 
 async def _oracle_day(lottery: str, day: date) -> tuple[list[dict], str | None]:
